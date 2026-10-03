@@ -77,6 +77,8 @@ deploys the API to Cloudflare and the frontend to GitHub Pages. One-time setup:
 1. **Cloudflare API token.** In the Cloudflare dashboard go to *My Profile > API Tokens >
    Create Token*, use the **Edit Cloudflare Workers** template and add the permission
    *Account > D1 > Edit*. Your **Account ID** is in the dashboard sidebar (Workers & Pages).
+   If you've never deployed a Worker on this account, also pick your **workers.dev subdomain**
+   once: *Workers & Pages* in the dashboard, then follow the prompt (or *Settings > Subdomain*).
 2. **GitHub secrets.** In this repo go to *Settings > Secrets and variables > Actions* and add
    the secrets `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`.
 3. **GitHub Pages.** In *Settings > Pages* set **Source** to **GitHub Actions**.

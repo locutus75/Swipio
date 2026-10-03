@@ -20,8 +20,8 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -47,9 +47,9 @@ jobs:
           else
             echo "ok=true" >> "$GITHUB_OUTPUT"
           fi
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         if: steps.creds.outputs.ok == 'true'
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         if: steps.creds.outputs.ok == 'true'
         with:
           node-version: 22
@@ -85,8 +85,13 @@ jobs:
         id: deploy
         if: steps.creds.outputs.ok == 'true'
         run: |
+          set -o pipefail # fail the step if wrangler fails, not just tee
           npx wrangler deploy | tee deploy.log
           url=$(grep -oE 'https://[A-Za-z0-9.-]+\.workers\.dev' deploy.log | head -1)
+          if [ -z "$url" ]; then
+            echo "::error::Deployed, but no workers.dev URL was printed. If you use a custom domain for the API, set the SWIPIO_API_URL variable."
+            exit 1
+          fi
           echo "url=$url" >> "$GITHUB_OUTPUT"
           echo "API deployed to $url"
 
@@ -104,7 +109,7 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Point the frontend at the API
         env:
           API_URL: ${{ vars.SWIPIO_API_URL || needs.worker.outputs.url }}
