@@ -94,9 +94,10 @@ whoever opens the site first can claim it.
 
 ### Custom domains
 
-- **Frontend:** add a `public/CNAME` file containing the domain (as SysCommander does) and set
-  it under *Settings > Pages*. Then add the domain to `ALLOWED_ORIGINS` in `wrangler.toml`, the
-  list of sites allowed to call the API.
+- **Frontend:** set the domain under *Settings > Pages > Custom domain* (with GitHub Actions
+  deploys no `CNAME` file is needed), then add it to `ALLOWED_ORIGINS` in `wrangler.toml`, the
+  list of sites allowed to call the API. Without that the site shows "Cannot reach the Swipio
+  server". Swipio currently runs at https://swipio.hihybi.org.
 - **API:** add a custom domain to the Worker in Cloudflare, and set the repository **variable**
   `SWIPIO_API_URL` (e.g. `https://api.swipio.example`) so the site uses it.
 
