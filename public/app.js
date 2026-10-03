@@ -67,6 +67,28 @@ function inviteLink(token) {
   return `${location.origin}${location.pathname}#/invite/${token}`;
 }
 
+/**
+ * fetch() that retries when the network fails outright (no response at all), which happens on
+ * flaky mobile connections. POSTs aren't retried because they could create something twice.
+ */
+async function fetchWithRetry(url, opts) {
+  const retries = opts.method === 'POST' ? 0 : 2;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await fetch(url, opts);
+    } catch (cause) {
+      if (attempt >= retries) {
+        console.error('Swipio API unreachable:', opts.method, url, cause);
+        const err = new Error('Cannot reach the Swipio server. Check your connection and try again.');
+        err.network = true;
+        err.detail = `${opts.method} ${new URL(url, location.href).pathname}: ${cause.message || cause}`;
+        throw err;
+      }
+      await new Promise((r) => setTimeout(r, attempt ? 1500 : 500));
+    }
+  }
+}
+
 async function api(method, url, body) {
   const opts = { method, headers: {} };
   if (memoryToken) opts.headers.Authorization = `Bearer ${memoryToken}`;
@@ -75,12 +97,7 @@ async function api(method, url, body) {
     opts.headers['Content-Type'] = 'application/json';
     opts.body = JSON.stringify(body);
   }
-  let res;
-  try {
-    res = await fetch(API_URL + url, opts);
-  } catch {
-    throw new Error('Cannot reach the Swipio server. Check your connection and try again.');
-  }
+  const res = await fetchWithRetry(API_URL + url, opts);
   const data = await res.json().catch(() => ({}));
   if (res.status === 401 && memoryToken && !url.startsWith('/api/login')) setToken(null);
   if (!res.ok) {
@@ -314,7 +331,17 @@ async function render() {
     }
     mount(
       topbar(),
-      h('div', { class: 'empty' }, h('div', { class: 'big' }, '😕'), h('p', {}, err.message), h('a', { href: '#/' }, 'Go home'))
+      h(
+        'div',
+        { class: 'empty' },
+        h('div', { class: 'big' }, '😕'),
+        h('p', {}, err.message),
+        h('div', { class: 'row', style: { justifyContent: 'center' } },
+          h('button', { class: 'primary', onclick: () => render() }, 'Try again'),
+          h('a', { class: 'btn', href: '#/' }, 'Go home')
+        ),
+        err.detail && h('p', { class: 'small muted' }, err.detail)
+      )
     );
   }
 }

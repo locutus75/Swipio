@@ -26,5 +26,10 @@ ALLOWED_ORIGINS = "https://swipio.hihybi.org,https://locutus75.github.io,http://
 # On the Workers Free plan (10 ms CPU per request) use 50000. Existing passwords keep working either way.
 PASSWORD_ITERATIONS = "100000"
 
+# Keep request logs (including errors such as exceeded CPU time) for the Cloudflare dashboard:
+# Workers & Pages > swipio > Logs.
+[observability]
+enabled = true
+
 [triggers]
 crons = ["* * * * *"] # close expired collections every minute
