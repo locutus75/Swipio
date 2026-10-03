@@ -8,6 +8,21 @@
 
 const $app = document.getElementById('app');
 let me = null;
+
+// participant < creator < manager < admin: each role can do everything the roles below it can.
+const ROLES = ['participant', 'creator', 'manager', 'admin'];
+const ROLE_LABELS = { participant: 'Participant', creator: 'Creator', manager: 'Manager', admin: 'Admin' };
+const ROLE_HINTS = {
+  participant: 'Swipes on collections they are invited to',
+  creator: 'Also creates and runs their own collections',
+  manager: 'Also sees all collections, who chose what, and manages people',
+  admin: 'Can do everything, including managing admins',
+};
+const roleRank = (role) => ROLES.indexOf(role);
+/** True if the signed-in user has at least this role. */
+const can = (role) => !!me && roleRank(me.role) >= roleRank(role);
+/** Roles the signed-in user may hand out: up to their own. */
+const grantableRoles = () => ROLES.filter((r) => roleRank(r) <= roleRank(me.role));
 let viewCleanups = [];
 
 /** Tiny DOM builder: h('div', {class: 'x', onclick}, 'text', child) */
@@ -252,7 +267,7 @@ function topbar(...right) {
 
 function userMenu() {
   return [
-    me.role === 'admin' && h('a', { class: 'btn', href: '#/admin' }, '⚙️ Admin'),
+    can('creator') && h('a', { class: 'btn', href: '#/admin' }, '⚙️ Manage'),
     h(
       'button',
       {
@@ -298,9 +313,9 @@ const routes = [
   [/^#\/login$/, viewLogin, { public: true }],
   [/^#\/invite\/([\w-]+)$/, viewInvite, { public: true }],
   [/^#\/c\/(\d+)$/, viewCollection],
-  [/^#\/admin$/, viewAdmin, { admin: true }],
-  [/^#\/admin\/users$/, viewAdminUsers, { admin: true }],
-  [/^#\/admin\/c\/(\d+)(?:\/(items|people|results|settings))?$/, viewAdminCollection, { admin: true }],
+  [/^#\/admin$/, viewAdmin, { role: 'creator' }],
+  [/^#\/admin\/users$/, viewAdminUsers, { role: 'manager' }],
+  [/^#\/admin\/c\/(\d+)(?:\/(items|people|results|settings))?$/, viewAdminCollection, { role: 'creator' }],
   [/^#?\/?$/, viewHome],
 ];
 
@@ -322,7 +337,7 @@ async function render() {
         return go('#/login');
       }
     }
-    if (opts.admin && me.role !== 'admin') return go('#/');
+    if (opts.role && !can(opts.role)) return go('#/');
     await view(...params);
   } catch (err) {
     if (err.status === 401) {
@@ -492,7 +507,7 @@ async function viewHome() {
           { class: 'empty' },
           h('div', { class: 'big' }, '🛍️'),
           h('p', {}, "You haven't been invited to any collections yet."),
-          me.role === 'admin' && h('a', { class: 'btn primary', href: '#/admin' }, 'Create a collection')
+          can('creator') && h('a', { class: 'btn primary', href: '#/admin' }, 'Create a collection')
         )
   );
 }
@@ -804,7 +819,7 @@ function adminTabs(current) {
     'div',
     { class: 'tabs' },
     h('button', { class: current === 'collections' ? 'active' : '', onclick: () => go('#/admin') }, 'Collections'),
-    h('button', { class: current === 'users' ? 'active' : '', onclick: () => go('#/admin/users') }, 'People')
+    can('manager') && h('button', { class: current === 'users' ? 'active' : '', onclick: () => go('#/admin/users') }, 'People')
   );
 }
 
@@ -862,77 +877,93 @@ function inviteForm({ collectionId, onCreated }) {
       h('label', {}, 'Name', h('input', { name: 'name', required: true })),
       h('label', {}, 'Email', h('input', { name: 'email', type: 'email', required: true }))
     ),
-    !collectionId &&
-      h('label', {}, 'Role', h('select', { name: 'role' }, h('option', { value: 'user' }, 'Participant'), h('option', { value: 'admin' }, 'Admin'))),
+    !collectionId && h('label', {}, 'Role', roleSelect('participant')),
     h('button', { class: 'primary', type: 'submit' }, 'Create invite')
   );
+}
+
+/** Role picker with a one-line explanation of the chosen role underneath. */
+function roleSelect(value, attrs = {}) {
+  const hint = h('div', { class: 'muted small', style: { marginTop: '6px', fontWeight: 'normal' } }, ROLE_HINTS[value]);
+  const select = h(
+    'select',
+    { name: 'role', ...attrs },
+    grantableRoles().map((r) => h('option', { value: r, selected: r === value }, ROLE_LABELS[r]))
+  );
+  select.addEventListener('change', () => (hint.textContent = ROLE_HINTS[select.value]));
+  return h('div', {}, select, hint);
+}
+
+function roleBadge(role) {
+  return role && role !== 'participant' ? h('span', { class: `badge role-${role}` }, ROLE_LABELS[role]) : null;
+}
+
+/** Everything you can do with one person: role, invite link / password reset, delete. */
+function openUserSheet(u, onChange) {
+  const self = u.id === me.id;
+  const manageable = !self && roleRank(u.role) <= roleRank(me.role);
+  const badge = () => roleBadge(u.role) || h('span', { class: 'badge' }, 'Participant');
+  let currentBadge = badge();
+  const body = h(
+    'div',
+    { class: 'stack' },
+    h('div', {}, h('div', { class: 'name' }, u.name), h('div', { class: 'muted small' }, u.email)),
+    h('div', { class: 'row' }, currentBadge, u.status === 'invited' ? h('span', { class: 'badge' }, 'Invited') : h('span', { class: 'badge open' }, 'Active')),
+    self && h('p', { class: 'muted small' }, "This is you. Someone else has to change your role."),
+    !self && !manageable && h('p', { class: 'muted small' }, `Only an admin can change ${ROLE_LABELS[u.role]} accounts.`),
+    manageable &&
+      h('label', {}, 'Role', roleSelect(u.role, {
+        onchange: action(async (e) => {
+          await api('PATCH', `/api/admin/users/${u.id}`, { role: e.target.value });
+          u.role = e.target.value;
+          const next = badge();
+          currentBadge.replaceWith(next);
+          currentBadge = next;
+          toast(`${u.name} is now ${ROLE_LABELS[u.role]}`);
+          onChange();
+        }),
+      })),
+    u.status === 'invited' && u.inviteToken && h('button', { onclick: () => inviteDialog(u) }, '✉️ Show invite link'),
+    manageable &&
+      u.status === 'active' &&
+      h('button', {
+        onclick: action(async () => {
+          if (!(await confirmDialog(`Reset ${u.name}'s password? They will get a new invite link.`))) return;
+          const { user } = await api('POST', `/api/admin/users/${u.id}/invite`);
+          dlg.close();
+          inviteDialog(user);
+          onChange();
+        }),
+      }, '🔑 Reset password'),
+    manageable &&
+      h('button', {
+        class: 'danger',
+        onclick: action(async () => {
+          if (!(await confirmDialog(`Delete ${u.name}? Their swipes and items will be removed.`))) return;
+          await api('DELETE', `/api/admin/users/${u.id}`);
+          dlg.close();
+          onChange();
+        }),
+      }, 'Delete')
+  );
+  const dlg = openSheet('Person', body);
 }
 
 async function viewAdminUsers() {
   const { users } = await api('GET', '/api/admin/users');
   const row = (u) =>
     h(
-      'div',
-      { class: 'item-row' },
+      'button',
+      { class: 'item-row item-button', onclick: () => openUserSheet(u, () => render()) },
       h('div', { class: 'thumb' }, u.name.charAt(0).toUpperCase()),
-      h(
-        'div',
-        { class: 'grow' },
-        h('div', { class: 'name' }, u.name, ' ', u.role === 'admin' && h('span', { class: 'badge' }, 'Admin')),
-        h('div', { class: 'muted small' }, u.email)
-      ),
-      u.status === 'invited'
-        ? h('button', { onclick: () => inviteDialog(u) }, '✉️ Invite link')
-        : h('span', { class: 'badge open' }, 'Active'),
-      u.id !== me.id &&
-        h(
-          'select',
-          {
-            style: { width: 'auto' },
-            'aria-label': 'Role',
-            onchange: action(async (e) => {
-              await api('PATCH', `/api/admin/users/${u.id}`, { role: e.target.value });
-              toast('Role updated');
-            }),
-          },
-          h('option', { value: 'user', selected: u.role === 'user' }, 'Participant'),
-          h('option', { value: 'admin', selected: u.role === 'admin' }, 'Admin')
-        ),
-      u.id !== me.id &&
-        u.status === 'active' &&
-        h(
-          'button',
-          {
-            class: 'ghost',
-            title: 'Reset password',
-            onclick: action(async () => {
-              if (!(await confirmDialog(`Reset ${u.name}'s password? They will get a new invite link.`))) return;
-              const { user } = await api('POST', `/api/admin/users/${u.id}/invite`);
-              inviteDialog(user);
-              render();
-            }),
-          },
-          '🔑'
-        ),
-      u.id !== me.id &&
-        h(
-          'button',
-          {
-            class: 'ghost',
-            title: 'Delete',
-            onclick: action(async () => {
-              if (!(await confirmDialog(`Delete ${u.name}? Their swipes and items will be removed.`))) return;
-              await api('DELETE', `/api/admin/users/${u.id}`);
-              render();
-            }),
-          },
-          '🗑'
-        )
+      h('div', { class: 'grow' }, h('div', { class: 'name' }, u.name, ' ', roleBadge(u.role)), h('div', { class: 'muted small' }, u.email)),
+      u.status === 'invited' && h('span', { class: 'badge' }, 'Invited'),
+      h('span', { class: 'chev', 'aria-hidden': 'true' }, '›')
     );
 
   mount(
     topbar(h('a', { class: 'btn', href: '#/' }, '🃏 Swipe'), ...userMenu().slice(1)),
-    h('h1', {}, 'Admin'),
+    h('h1', {}, 'Manage'),
     adminTabs('users'),
     inviteForm({ onCreated: () => render() }),
     h('div', { class: 'section card' }, users.map(row))
@@ -943,7 +974,7 @@ async function viewAdmin() {
   const { collections } = await api('GET', '/api/admin/collections');
   mount(
     topbar(h('a', { class: 'btn', href: '#/' }, '🃏 Swipe'), ...userMenu().slice(1)),
-    h('h1', {}, 'Admin'),
+    h('h1', {}, 'Manage'),
     adminTabs('collections'),
     h('button', { class: 'primary block big-btn', onclick: openNewCollectionSheet }, '＋ New collection'),
     h(
@@ -955,10 +986,11 @@ async function viewAdmin() {
               'a',
               { class: 'card collection-card', href: `#/admin/c/${c.id}` },
               h('div', { class: 'row spread' }, h('h3', {}, c.name), countdown(c)),
-              h('div', { class: 'muted small' }, `${plural(c.itemCount, 'item')} · ${plural(c.memberCount, 'person', 'people')} · closes ${formatDate(c.expiresAt)}`)
+              h('div', { class: 'muted small' }, `${plural(c.itemCount, 'item')} · ${plural(c.memberCount, 'person', 'people')} · closes ${formatDate(c.expiresAt)}`),
+              can('manager') && c.createdBy && c.createdBy.id !== me.id && h('div', { class: 'muted small' }, `by ${c.createdBy.name}`)
             )
           )
-        : h('div', { class: 'empty' }, h('div', { class: 'big' }, '📦'), h('p', {}, 'No collections yet. Create one, then snap photos of the items.'))
+        : h('div', { class: 'empty' }, h('div', { class: 'big' }, '📦'), h('p', {}, can('manager') ? 'No collections yet. Create one, then snap photos of the items.' : "You haven't created any collections yet. Create one, then snap photos of the items."))
     )
   );
 }
@@ -1380,6 +1412,8 @@ async function viewAdminCollection(id, tab) {
       h('label', {}, 'Name', title),
       h('div', { class: 'row spread' }, h('span', { class: 'label' }, 'How many?'), qty),
       h('label', {}, 'Description', desc),
+      item && data.seeChoices &&
+        h('p', { class: 'small muted' }, likersOf(item.id).length ? `♥ Wanted by ${likersOf(item.id).join(', ')}` : '♥ Nobody wants this yet'),
       item &&
         h('details', {}, h('summary', { class: 'muted small' }, 'Use an image link instead'), h('label', { class: 'small' }, 'Image URL', imageUrl)),
       item
@@ -1486,6 +1520,35 @@ async function viewAdminCollection(id, tab) {
   );
 
   // --- people ---
+  // Managers+: who liked/passed what, per person and per item.
+  const choicesOf = (userId) => data.choices.filter((c) => c.userId === userId);
+  const likersOf = (itemId) =>
+    data.choices.filter((c) => c.itemId === itemId && c.liked).map((c) => data.members.find((m) => m.id === c.userId)?.name).filter(Boolean);
+
+  function openChoicesSheet(member) {
+    const mine = choicesOf(member.id);
+    const itemById = new Map(data.items.map((i) => [i.id, i]));
+    const list = (liked) =>
+      mine
+        .filter((c) => c.liked === liked && itemById.has(c.itemId))
+        .map((c) => itemById.get(c.itemId))
+        .map((item) => h('div', { class: 'item-row' }, thumb(item), h('div', { class: 'grow name' }, item.title)));
+    const wants = list(true);
+    const passes = list(false);
+    const open = data.items.length - mine.length;
+    openSheet(
+      `${member.name}'s choices`,
+      h(
+        'div',
+        { class: 'stack' },
+        h('p', { class: 'muted small' }, `${plural(wants.length, 'item')} wanted · ${passes.length} passed · ${open} not swiped yet`),
+        h('h3', {}, '♥ Wants'),
+        wants.length ? h('div', { class: 'card' }, wants) : h('p', { class: 'muted' }, 'Nothing yet.'),
+        passes.length > 0 && h('details', {}, h('summary', { class: 'muted' }, `✕ Passed (${passes.length})`), h('div', { class: 'card' }, passes))
+      )
+    );
+  }
+
   const renderPeople = () => {
     const memberIds = new Set(data.members.map((m) => m.id));
     const swipedBy = new Map(data.members.map((m) => [m.id, m.swiped]));
@@ -1511,14 +1574,23 @@ async function viewAdminCollection(id, tab) {
                 { class: 'item-row check' },
                 h('input', { type: 'checkbox', name: 'member', value: u.id, checked: memberIds.has(u.id) }),
                 h('div', { class: 'grow' }, h('div', { class: 'name' }, u.name, u.status === 'invited' ? ' (invited)' : ''), h('div', { class: 'muted small' }, u.email)),
-                memberIds.has(u.id) && h('span', { class: 'muted small' }, `${swipedBy.get(u.id)}/${data.items.length}`),
-                u.status === 'invited' && h('button', { type: 'button', 'aria-label': 'Invite link', onclick: (e) => { e.preventDefault(); inviteDialog(u); } }, '✉️')
+                memberIds.has(u.id) && !data.seeChoices && h('span', { class: 'muted small' }, `${swipedBy.get(u.id)}/${data.items.length}`),
+                memberIds.has(u.id) && data.seeChoices &&
+                  h('button', {
+                    type: 'button',
+                    class: 'chip',
+                    title: 'See what they chose',
+                    onclick: (e) => { e.preventDefault(); openChoicesSheet(data.members.find((m) => m.id === u.id)); },
+                  }, `♥ ${choicesOf(u.id).filter((c) => c.liked).length} · ${swipedBy.get(u.id)}/${data.items.length}`),
+                u.status === 'invited' && u.inviteToken && h('button', { type: 'button', 'aria-label': 'Invite link', onclick: (e) => { e.preventDefault(); inviteDialog(u); } }, '✉️')
               )
             )
-          : h('p', { class: 'muted' }, 'No people yet. Invite someone below.'),
+          : h('p', { class: 'muted' }, can('manager') ? 'No people yet. Invite someone below.' : 'No people yet.'),
         h('div', { class: 'row', style: { marginTop: '12px' } }, h('button', { class: 'primary', type: 'submit' }, 'Save participants'))
       ),
-      h('div', { class: 'section' }, inviteForm({ collectionId: id, onCreated: () => reopen('people') }))
+      can('manager')
+        ? h('div', { class: 'section' }, inviteForm({ collectionId: id, onCreated: () => reopen('people') }))
+        : h('p', { class: 'muted small section' }, 'Someone new? Ask a manager to invite them, then tick them here.')
     );
   };
 
@@ -1565,7 +1637,28 @@ async function viewAdminCollection(id, tab) {
     );
 
   // --- results ---
-  const renderResults = () => {
+  const renderResults = () => (data.seeChoices ? renderResultsByPerson() : renderResultTotals());
+
+  // Creators: how many of each item were handed out, without who got what.
+  const renderResultTotals = () => {
+    const units = data.items.reduce((n, i) => n + i.quantity, 0);
+    const given = data.items.reduce((n, i) => n + Math.min(i.allocated, i.quantity), 0);
+    return h(
+      'div',
+      {},
+      h('p', { class: 'muted' }, `${given} of ${plural(units, 'unit')} handed out. A manager can see who gets what and track pickups.`),
+      h(
+        'div',
+        { class: 'card' },
+        data.items.map((i) =>
+          h('div', { class: 'item-row' }, thumb(i), h('div', { class: 'grow name' }, i.title),
+            h('span', { class: i.allocated ? 'badge open' : 'badge' }, i.allocated ? `${i.allocated}/${i.quantity} taken` : 'Unclaimed'))
+        )
+      )
+    );
+  };
+
+  const renderResultsByPerson = () => {
     const byUser = new Map();
     for (const a of data.allocations) {
       if (!byUser.has(a.userId)) byUser.set(a.userId, { name: a.userName, list: [] });

@@ -1011,3 +1011,19 @@ body:has(#app.has-action-bar) #toasts {
 .topbar button {
   white-space: nowrap;
 }
+
+/* Role badges */
+.badge.role-admin {
+  background: rgba(255, 77, 109, 0.14);
+  color: var(--nope);
+}
+
+.badge.role-manager {
+  background: rgba(124, 92, 255, 0.15);
+  color: #7c5cff;
+}
+
+.badge.role-creator {
+  background: rgba(255, 142, 60, 0.16);
+  color: #d96a12;
+}

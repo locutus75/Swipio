@@ -1,6 +1,6 @@
 # Swipio
 
-Tinder-style swiping, but for items. An admin puts items into a **collection**, sets a
+Tinder-style swiping, but for items. A creator puts items into a **collection**, sets a
 deadline and invites people. Participants swipe right on what they want and left on what
 they don't. When the timer runs out the items are allocated and everyone sees what they
 can pick up.
@@ -13,17 +13,28 @@ can pick up.
 - Live countdown per collection
 - When it closes: "You get N items" with the pickup status of each one
 
-**Admins**
+**Roles.** There are four, and each role can do everything the roles below it can:
+
+| Role | Can |
+| --- | --- |
+| **Participant** | Swipe on the collections they're invited to |
+| **Creator** | Also create and run **their own** collections: items and photos, deadline, publish, close, and pick participants from existing people. Sees totals (likes per item, how far people are), not who chose what |
+| **Manager** | Also see and run **all** collections, see **who chose what**, see results per person and track pickups, and invite/manage people up to Manager |
+| **Admin** | Everything, including making and managing other admins. The first account is the admin |
+
+**Creating collections**
 - Create collections with a name, description and closing time (quick picks: 1 day, 3 days, 1 week, 2 weeks); keep them as drafts until you tap **Publish**
 - Built for adding items from a phone: tap **Take photo**, type a name, tap **Save & next photo**
   and the camera opens again for the next item. Or pick several photos from the gallery and name
   them in one list. Items upload in the background while you carry on, and photos are shrunk in
   the browser first, so even big phone photos upload quickly. Items can also have a description,
   a quantity, or an image link instead of a photo
-- See how many people want or pass on each item, and how far each participant has got
-- Invite people by name and email. You get an invite link to copy, email or share; the
-  person sets their own password. Invite straight into a collection, or pick participants from everyone
 - Close a collection early, or move the deadline later to re-open it
+
+**Managing people and results** (Manager and Admin)
+- Invite people by name and email. You get an invite link to copy, email or share; the
+  person sets their own password. Invite straight into a collection, or from the People page
+- Per collection: what each person wants and passed on, and who wants each item
 - Results page per person, with a checkbox to mark items as collected, plus a list of unclaimed items
 - Manage people: roles, password reset (gives a new invite link), delete
 
