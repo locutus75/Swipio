@@ -638,6 +638,317 @@ dialog::backdrop {
   border-radius: 10px;
 }
 
+/* ---------- admin: mobile-first item entry ---------- */
+
+.big-btn {
+  padding: 14px 20px;
+  font-size: 1.05rem;
+}
+
+.label {
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.error-text {
+  color: var(--nope);
+}
+
+.status-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+  padding: 14px 16px;
+}
+
+.status-card .grow {
+  flex: 1;
+  min-width: 0;
+}
+
+.status-card .muted {
+  margin-top: 4px;
+}
+
+.chips {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.chip {
+  padding: 8px 14px;
+  font-size: 0.9rem;
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.chip.on {
+  background: var(--gradient);
+  color: #fff;
+  border-color: transparent;
+}
+
+/* Bottom sheet: slides up on phones, centred dialog on larger screens. */
+dialog.sheet {
+  margin: auto auto 0;
+  width: 100%;
+  max-width: 560px;
+  max-height: 92dvh;
+  overflow-y: auto;
+  border-radius: 22px 22px 0 0;
+  padding: 8px 16px calc(18px + env(safe-area-inset-bottom));
+  animation: sheet-up 0.22s ease-out;
+}
+
+@media (min-width: 640px) {
+  dialog.sheet {
+    margin: auto;
+    border-radius: var(--radius);
+    padding: 12px 22px 22px;
+  }
+}
+
+@keyframes sheet-up {
+  from {
+    transform: translateY(40px);
+    opacity: 0;
+  }
+}
+
+.sheet-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  position: sticky;
+  top: -8px;
+  background: var(--surface);
+  padding: 8px 0;
+  z-index: 1;
+}
+
+.sheet-head h2 {
+  margin: 0;
+  font-size: 1.2rem;
+}
+
+.sheet-actions {
+  display: grid;
+  gap: 8px;
+}
+
+.sheet-actions button,
+.grow-btn {
+  padding: 13px 18px;
+}
+
+.grow-btn {
+  flex: 1;
+}
+
+.photo-box {
+  position: relative;
+  border-radius: 16px;
+  overflow: hidden;
+  background: var(--surface-2);
+  aspect-ratio: 4 / 3;
+  max-height: 40dvh;
+  width: 100%;
+}
+
+.photo-box img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.photo-actions {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  display: flex;
+  gap: 6px;
+}
+
+.photo-actions button {
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  padding: 7px 12px;
+  font-size: 0.85rem;
+}
+
+.photo-empty {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: center;
+  justify-content: center;
+}
+
+.stepper {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--surface);
+}
+
+.stepper button {
+  border-radius: 0;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  font-size: 1.3rem;
+  background: transparent;
+}
+
+.stepper input {
+  width: 56px;
+  border: 0;
+  border-radius: 0;
+  text-align: center;
+  padding: 8px 0;
+  -moz-appearance: textfield;
+}
+
+.stepper input::-webkit-outer-spin-button,
+.stepper input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.stepper input:focus {
+  outline: none;
+}
+
+.bulk-list {
+  display: grid;
+  gap: 12px;
+}
+
+.bulk-row {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.bulk-row .thumb {
+  width: 72px;
+  height: 72px;
+}
+
+.bulk-row .grow {
+  flex: 1;
+  min-width: 0;
+}
+
+.stack-sm > * + * {
+  margin-top: 8px;
+}
+
+/* Tappable item rows in the admin list */
+.item-button {
+  width: 100%;
+  border-radius: 0;
+  background: transparent;
+  text-align: left;
+  font-weight: inherit;
+  padding: 10px 0;
+  justify-content: flex-start;
+}
+
+.item-button:active {
+  transform: none;
+  background: var(--surface-2);
+}
+
+.chev {
+  color: var(--muted);
+  font-size: 1.5rem;
+}
+
+.spinner {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 3px solid var(--surface-2);
+  border-top-color: var(--brand);
+  animation: spin 0.8s linear infinite;
+  flex: none;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Fixed bottom bar with the "add item" actions, within thumb reach */
+.action-bar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 20;
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+  padding: 10px 16px calc(10px + env(safe-area-inset-bottom));
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border-top: 1px solid var(--border);
+}
+
+.action-bar[hidden] {
+  display: none;
+}
+
+.action-bar button {
+  padding: 13px 18px;
+  font-size: 1rem;
+}
+
+.action-bar .primary {
+  flex: 1;
+  max-width: 300px;
+}
+
+.action-bar .icon-btn {
+  width: 48px;
+  height: 48px;
+  flex: none;
+}
+
+#app.has-action-bar {
+  padding-bottom: calc(96px + env(safe-area-inset-bottom));
+}
+
+#upload-pill {
+  position: fixed;
+  top: calc(10px + env(safe-area-inset-top));
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 50;
+  background: #1d1b22;
+  color: #fff;
+  padding: 8px 16px;
+  border-radius: 999px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-decoration: none;
+  box-shadow: var(--shadow);
+  white-space: nowrap;
+}
+
+#upload-pill.failed {
+  background: var(--nope);
+}
+
 /* ---------- toasts ---------- */
 
 #toasts {
@@ -673,8 +984,30 @@ dialog::backdrop {
 
 @media (prefers-reduced-motion: reduce) {
   .swipe-card,
-  .toast {
+  .toast,
+  dialog.sheet {
     transition: none;
     animation: none;
   }
+}
+
+/* Keep toasts above the admin action bar */
+body:has(#app.has-action-bar) #toasts {
+  bottom: calc(90px + env(safe-area-inset-bottom));
+}
+
+/* Tabs scroll sideways on very narrow screens instead of squashing */
+.tabs {
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.tabs button {
+  flex: 1 0 auto;
+  white-space: nowrap;
+}
+
+.topbar .btn,
+.topbar button {
+  white-space: nowrap;
 }

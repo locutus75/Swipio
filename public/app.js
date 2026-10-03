@@ -184,19 +184,37 @@ function thumb(item, cls = 'thumb', fallbackCls = cls) {
 /** Shrinks a photo to at most 1200px and re-encodes it as JPEG, so uploads stay small. */
 async function resizeImage(file, max = 1200) {
   if (file.type === 'image/gif') return file; // keep animations
-  let bitmap;
-  try {
-    bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
-  } catch {
-    throw new Error('That file could not be read as an image.');
-  }
-  const scale = Math.min(1, max / Math.max(bitmap.width, bitmap.height));
+  const image = await loadImage(file);
+  const w = image.naturalWidth || image.width;
+  const hgt = image.naturalHeight || image.height;
+  const scale = Math.min(1, max / Math.max(w, hgt));
   const canvas = document.createElement('canvas');
-  canvas.width = Math.round(bitmap.width * scale);
-  canvas.height = Math.round(bitmap.height * scale);
-  canvas.getContext('2d').drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-  bitmap.close?.();
-  return new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.82));
+  canvas.width = Math.round(w * scale);
+  canvas.height = Math.round(hgt * scale);
+  canvas.getContext('2d').drawImage(image, 0, 0, canvas.width, canvas.height);
+  image.close?.();
+  const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.82));
+  if (!blob) throw new Error('That photo could not be processed.');
+  return blob;
+}
+
+/** Decodes a photo, honouring its rotation. Falls back to <img> where createImageBitmap is limited. */
+async function loadImage(file) {
+  try {
+    return await createImageBitmap(file, { imageOrientation: 'from-image' });
+  } catch {
+    const url = URL.createObjectURL(file);
+    try {
+      const img = new Image();
+      img.src = url;
+      await img.decode();
+      return img;
+    } catch {
+      throw new Error('That file could not be read as an image.');
+    } finally {
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+  }
 }
 
 function copy(text) {
@@ -265,7 +283,7 @@ const routes = [
   [/^#\/c\/(\d+)$/, viewCollection],
   [/^#\/admin$/, viewAdmin, { admin: true }],
   [/^#\/admin\/users$/, viewAdminUsers, { admin: true }],
-  [/^#\/admin\/c\/(\d+)$/, viewAdminCollection, { admin: true }],
+  [/^#\/admin\/c\/(\d+)(?:\/(items|people|results|settings))?$/, viewAdminCollection, { admin: true }],
   [/^#?\/?$/, viewHome],
 ];
 
@@ -763,55 +781,6 @@ function adminTabs(current) {
   );
 }
 
-async function viewAdmin() {
-  const { collections } = await api('GET', '/api/admin/collections');
-  const defaultExpiry = Date.now() + 7 * 24 * 3600 * 1000;
-
-  const newForm = h(
-    'form',
-    {
-      class: 'card stack',
-      onsubmit: action(async (e) => {
-        const f = formData(e.target);
-        const { collection } = await api('POST', '/api/admin/collections', {
-          name: f.name,
-          description: f.description,
-          expiresAt: new Date(f.expiresAt).getTime(),
-        });
-        go(`#/admin/c/${collection.id}`);
-      }),
-    },
-    h('h3', {}, 'New collection'),
-    h('div', { class: 'grid-2' },
-      h('label', {}, 'Name', h('input', { name: 'name', required: true, placeholder: 'e.g. Office move giveaway' })),
-      h('label', {}, 'Closes at', h('input', { name: 'expiresAt', type: 'datetime-local', required: true, value: toLocalInput(defaultExpiry) }))
-    ),
-    h('label', {}, 'Description', h('textarea', { name: 'description', placeholder: 'Pickup location, rules, …' })),
-    h('button', { class: 'primary', type: 'submit' }, 'Create collection')
-  );
-
-  mount(
-    topbar(h('a', { class: 'btn', href: '#/' }, '🃏 Swipe'), ...userMenu().slice(1)),
-    h('h1', {}, 'Admin'),
-    adminTabs('collections'),
-    newForm,
-    h(
-      'div',
-      { class: 'section list' },
-      collections.length
-        ? collections.map((c) =>
-            h(
-              'a',
-              { class: 'card collection-card', href: `#/admin/c/${c.id}` },
-              h('div', { class: 'row spread' }, h('h3', {}, c.name), countdown(c)),
-              h('div', { class: 'muted small' }, `${c.itemCount} items · ${c.memberCount} people · closes ${formatDate(c.expiresAt)}`)
-            )
-          )
-        : h('div', { class: 'empty' }, 'No collections yet. Create your first one above.')
-    )
-  );
-}
-
 function inviteDialog(user) {
   const url = inviteLink(user.inviteToken);
   const dlg = h(
@@ -943,55 +912,616 @@ async function viewAdminUsers() {
   );
 }
 
-async function viewAdminCollection(id) {
-  const [data, { users }] = await Promise.all([api('GET', `/api/admin/collections/${id}`), api('GET', '/api/admin/users')]);
-  const c = data.collection;
-  const refresh = () => viewAdminCollection(id);
-
-  // --- details ---
-  const details = h(
-    'form',
-    {
-      class: 'card stack',
-      onsubmit: action(async (e) => {
-        const f = formData(e.target);
-        const expiresAt = new Date(f.expiresAt).getTime();
-        if (c.state === 'closed' && expiresAt > Date.now()) {
-          if (!(await confirmDialog('Re-open this collection? Current results and pickup status will be discarded.'))) return;
-        }
-        await api('PATCH', `/api/admin/collections/${id}`, {
-          name: f.name,
-          description: f.description,
-          expiresAt,
-          published: f.published === 'on',
-        });
-        toast('Saved');
-        refresh();
-      }),
-    },
-    h('div', { class: 'grid-2' },
-      h('label', {}, 'Name', h('input', { name: 'name', required: true, value: c.name })),
-      h('label', {}, 'Closes at', h('input', { name: 'expiresAt', type: 'datetime-local', required: true, value: toLocalInput(c.expiresAt) }))
-    ),
-    h('label', {}, 'Description', h('textarea', { name: 'description' }, c.description)),
-    h('label', { class: 'check' }, h('input', { type: 'checkbox', name: 'published', checked: c.published }), 'Published — invited people can see and swipe this collection'),
+async function viewAdmin() {
+  const { collections } = await api('GET', '/api/admin/collections');
+  mount(
+    topbar(h('a', { class: 'btn', href: '#/' }, '🃏 Swipe'), ...userMenu().slice(1)),
+    h('h1', {}, 'Admin'),
+    adminTabs('collections'),
+    h('button', { class: 'primary block big-btn', onclick: openNewCollectionSheet }, '＋ New collection'),
     h(
       'div',
-      { class: 'row' },
-      h('button', { class: 'primary', type: 'submit' }, 'Save'),
-      c.state === 'open' &&
+      { class: 'section list' },
+      collections.length
+        ? collections.map((c) =>
+            h(
+              'a',
+              { class: 'card collection-card', href: `#/admin/c/${c.id}` },
+              h('div', { class: 'row spread' }, h('h3', {}, c.name), countdown(c)),
+              h('div', { class: 'muted small' }, `${plural(c.itemCount, 'item')} · ${plural(c.memberCount, 'person', 'people')} · closes ${formatDate(c.expiresAt)}`)
+            )
+          )
+        : h('div', { class: 'empty' }, h('div', { class: 'big' }, '📦'), h('p', {}, 'No collections yet. Create one, then snap photos of the items.'))
+    )
+  );
+}
+
+function plural(n, one, many = one + 's') {
+  return `${n} ${n === 1 ? one : many}`;
+}
+
+const DAY = 24 * 3600 * 1000;
+
+/** A deadline `days` from now, rounded up to the next whole hour. */
+function deadlineIn(days) {
+  const d = new Date(Date.now() + days * DAY);
+  if (d.getMinutes() || d.getSeconds()) d.setHours(d.getHours() + 1, 0, 0, 0);
+  return d.getTime();
+}
+
+/** Quick-pick buttons (1 day, 3 days, …) plus a date field that shows and fine-tunes the choice. */
+function deadlinePicker(initial) {
+  const input = h('input', { name: 'expiresAt', type: 'datetime-local', required: true, value: toLocalInput(initial) });
+  const options = [['1 day', 1], ['3 days', 3], ['1 week', 7], ['2 weeks', 14]];
+  const chips = options.map(([label, days]) =>
+    h('button', {
+      type: 'button',
+      class: 'chip',
+      onclick: () => {
+        input.value = toLocalInput(deadlineIn(days));
+        chips.forEach((c) => c.classList.toggle('on', c === chipFor(days)));
+      },
+    }, label)
+  );
+  const chipFor = (days) => chips[options.findIndex(([, d]) => d === days)];
+  input.addEventListener('input', () => chips.forEach((c) => c.classList.remove('on')));
+  return h('div', { class: 'stack' }, h('div', { class: 'chips' }, chips), input);
+}
+
+function openNewCollectionSheet() {
+  const name = h('input', { name: 'name', required: true, maxlength: 120, placeholder: 'e.g. Office move giveaway', autocapitalize: 'sentences' });
+  const form = h(
+    'form',
+    {
+      class: 'stack',
+      onsubmit: action(async (e) => {
+        const f = formData(e.target);
+        const { collection } = await api('POST', '/api/admin/collections', {
+          name: f.name,
+          description: f.description,
+          expiresAt: new Date(f.expiresAt).getTime(),
+        });
+        dlg.close();
+        go(`#/admin/c/${collection.id}/items`);
+      }),
+    },
+    h('label', {}, 'Name', name),
+    h('label', {}, 'Swiping closes', deadlinePicker(deadlineIn(7))),
+    h('label', {}, 'Description', h('textarea', { name: 'description', rows: 2, placeholder: 'Pickup location, rules… (optional)' })),
+    h('button', { class: 'primary block big-btn', type: 'submit' }, 'Create & add items')
+  );
+  const dlg = openSheet('New collection', form);
+  name.focus();
+}
+
+// ---------------------------------------------------------------------------
+// Sheets, photo picking and background uploads (used by the admin screens)
+// ---------------------------------------------------------------------------
+
+/** A dialog that slides up from the bottom on phones and is centred on bigger screens. */
+function openSheet(title, content, { onClose } = {}) {
+  const dlg = h(
+    'dialog',
+    { class: 'sheet' },
+    h('div', { class: 'sheet-head' }, h('h2', {}, title), h('button', { class: 'ghost icon-btn', type: 'button', 'aria-label': 'Close', onclick: () => dlg.close() }, '✕')),
+    content
+  );
+  dlg.addEventListener('close', () => {
+    dlg.remove();
+    onClose?.();
+  });
+  document.body.append(dlg);
+  dlg.showModal();
+  return dlg;
+}
+
+/**
+ * Opens the camera or the photo library and resolves with the chosen files ([] if cancelled).
+ * Must be called straight from a tap: browsers only open pickers in response to one.
+ */
+function pickPhotos({ camera = false, multiple = false } = {}) {
+  return new Promise((resolve) => {
+    const input = h('input', { type: 'file', accept: 'image/*', style: { display: 'none' } });
+    if (camera) input.setAttribute('capture', 'environment');
+    input.multiple = multiple;
+    const done = (files) => {
+      input.remove();
+      resolve(files);
+    };
+    input.addEventListener('change', () => done([...input.files]));
+    input.addEventListener('cancel', () => done([]));
+    document.body.append(input);
+    input.click();
+  });
+}
+
+function stepper(name, value = 1) {
+  const input = h('input', { name, type: 'number', min: 1, max: 10000, value, inputmode: 'numeric', 'aria-label': 'Quantity' });
+  const bump = (d) => {
+    input.value = Math.max(1, (parseInt(input.value, 10) || 1) + d);
+  };
+  return h(
+    'div',
+    { class: 'stepper' },
+    h('button', { type: 'button', 'aria-label': 'One less', onclick: () => bump(-1) }, '−'),
+    input,
+    h('button', { type: 'button', 'aria-label': 'One more', onclick: () => bump(1) }, '+')
+  );
+}
+
+/**
+ * New items are uploaded one after another in the background, so an admin can keep taking
+ * photos without waiting. Each entry shows in the item list until it's saved (or fails).
+ */
+const uploads = { entries: [], chain: Promise.resolve(), listener: null };
+
+function queueItemUpload(collectionId, item) {
+  const entry = {
+    collectionId: Number(collectionId),
+    title: item.title,
+    quantity: item.quantity,
+    description: item.description || '',
+    file: item.file || null,
+    preview: item.file ? URL.createObjectURL(item.file) : null,
+    status: 'queued',
+  };
+  uploads.entries.push(entry);
+  runUpload(entry);
+}
+
+function runUpload(entry) {
+  entry.status = 'queued';
+  notifyUploads(entry, false);
+  uploads.chain = uploads.chain.then(async () => {
+    if (!uploads.entries.includes(entry)) return; // removed while waiting
+    entry.status = 'uploading';
+    notifyUploads(entry, false);
+    try {
+      const fd = new FormData();
+      fd.set('title', entry.title);
+      fd.set('quantity', String(entry.quantity));
+      fd.set('description', entry.description);
+      if (entry.file) fd.set('image', await resizeImage(entry.file), 'photo.jpg');
+      await api('POST', `/api/admin/collections/${entry.collectionId}/items`, fd);
+      uploads.entries = uploads.entries.filter((e) => e !== entry);
+      if (entry.preview) URL.revokeObjectURL(entry.preview);
+      notifyUploads(entry, true);
+    } catch (err) {
+      entry.status = 'failed';
+      entry.error = err.message;
+      notifyUploads(entry, false);
+    }
+  });
+}
+
+function removeUpload(entry) {
+  uploads.entries = uploads.entries.filter((e) => e !== entry);
+  if (entry.preview) URL.revokeObjectURL(entry.preview);
+  notifyUploads(entry, false);
+}
+
+function notifyUploads(entry, saved) {
+  renderUploadPill();
+  uploads.listener?.(entry, saved);
+}
+
+/** Small floating status, visible on every screen while uploads are running or have failed. */
+function renderUploadPill() {
+  let pill = document.getElementById('upload-pill');
+  const active = uploads.entries.filter((e) => e.status !== 'failed').length;
+  const failed = uploads.entries.length - active;
+  if (!uploads.entries.length) return pill?.remove();
+  if (!pill) {
+    pill = h('a', { id: 'upload-pill' });
+    document.body.append(pill);
+  }
+  pill.href = `#/admin/c/${uploads.entries[0].collectionId}/items`;
+  pill.classList.toggle('failed', !active);
+  pill.textContent = active
+    ? `⬆ Uploading ${plural(active, 'item')}…`
+    : `⚠ ${plural(failed, 'item')} not uploaded. Tap to retry`;
+}
+
+window.addEventListener('beforeunload', (e) => {
+  if (uploads.entries.some((x) => x.status !== 'failed')) {
+    e.preventDefault();
+    e.returnValue = '';
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Admin: one collection
+// ---------------------------------------------------------------------------
+
+async function viewAdminCollection(id, tab) {
+  const [data, { users }] = await Promise.all([api('GET', `/api/admin/collections/${id}`), api('GET', '/api/admin/users')]);
+  const c = data.collection;
+  const canAddItems = c.state !== 'closed';
+  const tabs = [
+    ['items', () => `Items (${data.items.length})`],
+    ['people', () => `People (${data.members.length})`],
+    c.state === 'closed' && ['results', () => 'Results'],
+    ['settings', () => 'Settings'],
+  ].filter(Boolean);
+  let current = tabs.some(([k]) => k === tab) ? tab : c.state === 'closed' ? 'results' : 'items';
+  const reopen = (t = current) => viewAdminCollection(id, t);
+
+  async function reloadItems() {
+    const fresh = await api('GET', `/api/admin/collections/${id}`);
+    data.items = fresh.items;
+    drawItems();
+    drawCounts();
+  }
+
+  // --- status + main action ---
+  const counts = h('div', { class: 'muted small' });
+  const drawCounts = () => {
+    counts.textContent = `${plural(data.items.length, 'item')} · ${plural(data.members.length, 'person', 'people')}`;
+    tabBar.querySelectorAll('button').forEach((b, i) => (b.textContent = tabs[i][1]()));
+  };
+
+  const publish = action(async () => {
+    const problems = [];
+    if (!data.items.length) problems.push('there are no items yet');
+    if (!data.members.length) problems.push('nobody has been invited yet');
+    if (problems.length && !(await confirmDialog(`Publish anyway? Note that ${problems.join(' and ')}.`))) return;
+    await api('PATCH', `/api/admin/collections/${id}`, { published: true });
+    toast('Published! Invited people can start swiping.');
+    reopen();
+  });
+
+  const closeNow = action(async () => {
+    if (!(await confirmDialog('Close this collection now and allocate the items?'))) return;
+    await api('POST', `/api/admin/collections/${id}/close`);
+    reopen('results');
+  });
+
+  const statusCard = h(
+    'div',
+    { class: 'card status-card' },
+    h('div', { class: 'grow' }, h('div', { class: 'row' }, countdown(c, { reload: true })), counts),
+    c.state === 'draft' && h('button', { class: 'primary', onclick: publish }, '🚀 Publish'),
+    c.state === 'open' && h('button', { onclick: closeNow }, '⏹ Close now')
+  );
+
+  // --- items ---
+  const itemsList = h('div', {});
+
+  function drawItems() {
+    const pending = uploads.entries.filter((e) => e.collectionId === Number(id));
+    const pendingRow = (e) =>
+      h(
+        'div',
+        { class: 'item-row' },
+        e.preview ? h('img', { class: 'thumb', src: e.preview, alt: '' }) : thumb(e),
         h(
-          'button',
-          {
-            type: 'button',
-            onclick: action(async () => {
-              if (!(await confirmDialog('Close this collection now and allocate the items?'))) return;
-              await api('POST', `/api/admin/collections/${id}/close`);
-              refresh();
-            }),
-          },
-          '⏹ Close now'
+          'div',
+          { class: 'grow' },
+          h('div', { class: 'name' }, e.title),
+          h('div', { class: e.status === 'failed' ? 'small error-text' : 'muted small' },
+            e.status === 'failed' ? `Not uploaded: ${e.error}` : e.status === 'uploading' ? 'Uploading…' : 'Waiting to upload…')
         ),
+        e.status === 'failed'
+          ? [h('button', { onclick: () => runUpload(e) }, 'Retry'), h('button', { class: 'ghost icon-btn', 'aria-label': 'Discard', onclick: () => removeUpload(e) }, '✕')]
+          : h('span', { class: 'spinner', 'aria-hidden': 'true' })
+      );
+    const itemRow = (item) =>
+      h(
+        'button',
+        { class: 'item-row item-button', onclick: () => openItemSheet({ item }) },
+        thumb(item),
+        h(
+          'div',
+          { class: 'grow' },
+          h('div', { class: 'name' }, item.title),
+          h('div', { class: 'muted small' }, `${item.quantity} available · ♥ ${item.likes} · ✕ ${item.passes}`)
+        ),
+        h('span', { class: 'chev', 'aria-hidden': 'true' }, '›')
+      );
+    const rows = [...pending.map(pendingRow), ...[...data.items].reverse().map(itemRow)];
+    itemsList.replaceChildren(
+      rows.length
+        ? h('div', { class: 'card' }, rows)
+        : h(
+            'div',
+            { class: 'empty' },
+            h('div', { class: 'big' }, '📸'),
+            h('p', {}, canAddItems ? 'No items yet. Tap "Take photo" below, give it a name, and keep going.' : 'This collection has no items.')
+          )
+    );
+  }
+
+  let refreshTimer;
+  uploads.listener = (entry, saved) => {
+    if (entry.collectionId !== Number(id)) return;
+    drawItems();
+    if (saved) {
+      clearTimeout(refreshTimer);
+      refreshTimer = setTimeout(() => reloadItems().catch(() => {}), 300);
+    }
+  };
+  viewCleanups.push(() => {
+    uploads.listener = null;
+    clearTimeout(refreshTimer);
+  });
+
+  /** Add or edit one item. `source` remembers camera vs gallery for "Save & next". */
+  function openItemSheet({ item = null, file = null, source = null } = {}) {
+    let photo = file;
+    let removeImage = false;
+    let previewUrl = null;
+
+    const preview = h('div', { class: 'photo-box' });
+    const drawPreview = () => {
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
+      previewUrl = photo ? URL.createObjectURL(photo) : null;
+      const src = previewUrl || (!removeImage && item?.image ? apiAsset(item.image) : null);
+      const content = src
+        ? [
+            h('img', { src, alt: '' }),
+            h(
+              'div',
+              { class: 'photo-actions' },
+              h('button', { type: 'button', onclick: () => choose(true) }, '📷 Retake'),
+              h('button', { type: 'button', onclick: () => choose(false) }, '🖼 Change'),
+              h('button', { type: 'button', 'aria-label': 'Remove photo', onclick: () => ((photo = null), (removeImage = true), drawPreview()) }, '✕')
+            ),
+          ]
+        : [
+            h(
+              'div',
+              { class: 'photo-empty' },
+              h('button', { type: 'button', class: 'primary', onclick: () => choose(true) }, '📷 Take photo'),
+              h('button', { type: 'button', onclick: () => choose(false) }, '🖼 Choose photo')
+            ),
+          ];
+      preview.replaceChildren(...content);
+    };
+    const choose = (camera) => {
+      source = camera ? 'camera' : 'gallery';
+      pickPhotos({ camera }).then((files) => {
+        if (!files[0]) return;
+        photo = files[0];
+        removeImage = false;
+        drawPreview();
+        if (!title.value) title.focus();
+      });
+    };
+
+    const title = h('input', {
+      name: 'title',
+      required: true,
+      maxlength: 120,
+      placeholder: 'What is it?',
+      value: item?.title || '',
+      autocomplete: 'off',
+      autocapitalize: 'sentences',
+      enterkeyhint: item ? 'done' : 'next',
+    });
+    const qty = stepper('quantity', item?.quantity || 1);
+    const desc = h('textarea', { name: 'description', rows: 2, placeholder: 'Condition, size, colour… (optional)' }, item?.description || '');
+    const imageUrl = h('input', { name: 'imageUrl', type: 'url', placeholder: 'https://…', value: item?.image?.startsWith('http') ? item.image : '' });
+
+    const reset = () => {
+      photo = null;
+      removeImage = false;
+      form.reset();
+      title.value = '';
+      qty.querySelector('input').value = 1;
+      desc.value = '';
+      drawPreview();
+    };
+
+    async function saveEdit() {
+      const fd = new FormData();
+      fd.set('title', title.value);
+      fd.set('quantity', qty.querySelector('input').value);
+      fd.set('description', desc.value);
+      if (photo) fd.set('image', await resizeImage(photo), 'photo.jpg');
+      else if (removeImage) fd.set('removeImage', 'true');
+      else if (imageUrl.value && imageUrl.value !== item.image) fd.set('imageUrl', imageUrl.value);
+      await api('PATCH', `/api/admin/items/${item.id}`, fd);
+      toast('Item updated');
+      dlg.close();
+      await reloadItems();
+    }
+
+    const form = h(
+      'form',
+      {
+        class: 'stack',
+        onsubmit: (e) => {
+          e.preventDefault();
+          if (item) return action(saveEdit)(e);
+          // New item: hand it to the background uploader and move on immediately.
+          queueItemUpload(id, {
+            title: title.value.trim(),
+            quantity: Number(qty.querySelector('input').value) || 1,
+            description: desc.value.trim(),
+            file: photo || null,
+          });
+          const next = (e.submitter?.value || 'next') === 'next';
+          if (!next) return dlg.close();
+          const again = source;
+          reset();
+          // Still inside the tap, so the browser lets us open the camera again right away.
+          if (again) choose(again === 'camera');
+          else title.focus();
+        },
+      },
+      preview,
+      h('label', {}, 'Name', title),
+      h('div', { class: 'row spread' }, h('span', { class: 'label' }, 'How many?'), qty),
+      h('label', {}, 'Description', desc),
+      item &&
+        h('details', {}, h('summary', { class: 'muted small' }, 'Use an image link instead'), h('label', { class: 'small' }, 'Image URL', imageUrl)),
+      item
+        ? h(
+            'div',
+            { class: 'row spread' },
+            h('button', { class: 'primary grow-btn', type: 'submit' }, 'Save'),
+            h(
+              'button',
+              {
+                type: 'button',
+                class: 'danger',
+                onclick: action(async () => {
+                  if (!(await confirmDialog(`Delete "${item.title}"?`))) return;
+                  await api('DELETE', `/api/admin/items/${item.id}`);
+                  dlg.close();
+                  await reloadItems();
+                }),
+              },
+              'Delete'
+            )
+          )
+        : h(
+            'div',
+            { class: 'sheet-actions' },
+            h('button', { class: 'primary', type: 'submit', name: 'mode', value: 'next' }, source ? 'Save & next photo' : 'Save & add another'),
+            h('button', { type: 'submit', name: 'mode', value: 'done' }, 'Save & close')
+          )
+    );
+
+    drawPreview();
+    const dlg = openSheet(item ? 'Edit item' : 'New item', form, {
+      onClose: () => previewUrl && URL.revokeObjectURL(previewUrl),
+    });
+    if (!item) title.focus();
+  }
+
+  /** Several photos from the gallery: name them all in one list, then upload together. */
+  function openBulkSheet(files) {
+    const rows = files.map((file) => {
+      const url = URL.createObjectURL(file);
+      const row = h(
+        'div',
+        { class: 'bulk-row' },
+        h('img', { class: 'thumb', src: url, alt: '' }),
+        h('div', { class: 'grow stack-sm' },
+          h('input', { name: 'title', required: true, maxlength: 120, placeholder: 'What is it?', autocapitalize: 'sentences', enterkeyhint: 'next' }),
+          stepper('quantity', 1)
+        ),
+        h('button', { type: 'button', class: 'ghost icon-btn', 'aria-label': 'Skip this photo', onclick: () => { row.remove(); URL.revokeObjectURL(url); updateButton(); } }, '✕')
+      );
+      row.file = file;
+      row.url = url;
+      return row;
+    });
+    const list = h('div', { class: 'bulk-list' }, rows);
+    const submit = h('button', { class: 'primary block big-btn', type: 'submit' });
+    const updateButton = () => {
+      const n = list.children.length;
+      submit.textContent = `Add ${plural(n, 'item')}`;
+      submit.disabled = !n;
+    };
+    const form = h(
+      'form',
+      {
+        class: 'stack',
+        onsubmit: (e) => {
+          e.preventDefault();
+          for (const row of list.children) {
+            queueItemUpload(id, {
+              title: row.querySelector('[name=title]').value.trim(),
+              quantity: Number(row.querySelector('[name=quantity]').value) || 1,
+              file: row.file,
+            });
+          }
+          dlg.close();
+        },
+      },
+      h('p', { class: 'muted small' }, 'Give each photo a name. They upload in the background.'),
+      list,
+      submit
+    );
+    updateButton();
+    const dlg = openSheet(`${plural(files.length, 'photo')}`, form, {
+      onClose: () => rows.forEach((r) => URL.revokeObjectURL(r.url)),
+    });
+    list.querySelector('input')?.focus();
+  }
+
+  const takePhoto = () =>
+    pickPhotos({ camera: true }).then((files) => files[0] && openItemSheet({ file: files[0], source: 'camera' }));
+  const fromGallery = () =>
+    pickPhotos({ multiple: true }).then((files) => {
+      if (files.length === 1) openItemSheet({ file: files[0], source: 'gallery' });
+      else if (files.length) openBulkSheet(files);
+    });
+
+  const actionBar = h(
+    'div',
+    { class: 'action-bar' },
+    h('button', { class: 'primary', onclick: takePhoto }, '📷 Take photo'),
+    h('button', { onclick: fromGallery }, '🖼 Gallery'),
+    h('button', { class: 'icon-btn', title: 'Add without a photo', 'aria-label': 'Add without a photo', onclick: () => openItemSheet() }, '✎')
+  );
+
+  // --- people ---
+  const renderPeople = () => {
+    const memberIds = new Set(data.members.map((m) => m.id));
+    const swipedBy = new Map(data.members.map((m) => [m.id, m.swiped]));
+    return h(
+      'div',
+      {},
+      h(
+        'form',
+        {
+          class: 'card',
+          onsubmit: action(async (e) => {
+            const ids = [...e.target.querySelectorAll('input[name=member]:checked')].map((el) => Number(el.value));
+            await api('PUT', `/api/admin/collections/${id}/members`, { userIds: ids });
+            toast('Participants saved');
+            reopen('people');
+          }),
+        },
+        h('p', { class: 'muted small', style: { marginTop: 0 } }, 'Tick who can swipe on this collection.'),
+        users.length
+          ? users.map((u) =>
+              h(
+                'label',
+                { class: 'item-row check' },
+                h('input', { type: 'checkbox', name: 'member', value: u.id, checked: memberIds.has(u.id) }),
+                h('div', { class: 'grow' }, h('div', { class: 'name' }, u.name, u.status === 'invited' ? ' (invited)' : ''), h('div', { class: 'muted small' }, u.email)),
+                memberIds.has(u.id) && h('span', { class: 'muted small' }, `${swipedBy.get(u.id)}/${data.items.length}`),
+                u.status === 'invited' && h('button', { type: 'button', 'aria-label': 'Invite link', onclick: (e) => { e.preventDefault(); inviteDialog(u); } }, '✉️')
+              )
+            )
+          : h('p', { class: 'muted' }, 'No people yet. Invite someone below.'),
+        h('div', { class: 'row', style: { marginTop: '12px' } }, h('button', { class: 'primary', type: 'submit' }, 'Save participants'))
+      ),
+      h('div', { class: 'section' }, inviteForm({ collectionId: id, onCreated: () => reopen('people') }))
+    );
+  };
+
+  // --- settings ---
+  const renderSettings = () =>
+    h(
+      'form',
+      {
+        class: 'card stack',
+        onsubmit: action(async (e) => {
+          const f = formData(e.target);
+          const expiresAt = new Date(f.expiresAt).getTime();
+          if (c.state === 'closed' && expiresAt > Date.now()) {
+            if (!(await confirmDialog('Re-open this collection? Current results and pickup status will be discarded.'))) return;
+          }
+          await api('PATCH', `/api/admin/collections/${id}`, {
+            name: f.name,
+            description: f.description,
+            expiresAt,
+            published: f.published === 'on',
+          });
+          toast('Saved');
+          reopen('settings');
+        }),
+      },
+      h('label', {}, 'Name', h('input', { name: 'name', required: true, value: c.name })),
+      h('label', {}, 'Swiping closes', deadlinePicker(c.expiresAt)),
+      h('label', {}, 'Description', h('textarea', { name: 'description', rows: 3 }, c.description)),
+      h('label', { class: 'check' }, h('input', { type: 'checkbox', name: 'published', checked: c.published }), 'Published: invited people can see and swipe this collection'),
+      h('button', { class: 'primary', type: 'submit' }, 'Save'),
       h(
         'button',
         {
@@ -1003,116 +1533,12 @@ async function viewAdminCollection(id) {
             go('#/admin');
           }),
         },
-        'Delete'
-      )
-    )
-  );
-
-  // --- items ---
-  const itemForm = (item) =>
-    h(
-      'form',
-      {
-        class: 'stack',
-        onsubmit: action(async (e) => {
-          const fd = new FormData(e.target);
-          const file = fd.get('image');
-          fd.delete('image');
-          if (file && file.size) fd.set('image', await resizeImage(file), 'photo.jpg');
-          if (item) await api('PATCH', `/api/admin/items/${item.id}`, fd);
-          else await api('POST', `/api/admin/collections/${id}/items`, fd);
-          e.target.closest('dialog')?.close();
-          toast(item ? 'Item updated' : 'Item added');
-          refresh();
-        }),
-      },
-      h('div', { class: 'grid-2' },
-        h('label', {}, 'Title', h('input', { name: 'title', required: true, value: item?.title || '' })),
-        h('label', {}, 'Quantity', h('input', { name: 'quantity', type: 'number', min: 1, value: item?.quantity || 1 }))
-      ),
-      h('label', {}, 'Description', h('textarea', { name: 'description' }, item?.description || '')),
-      h('div', { class: 'grid-2' },
-        h('label', {}, 'Photo', h('input', { name: 'image', type: 'file', accept: 'image/*' })),
-        h('label', {}, '…or image URL', h('input', { name: 'imageUrl', type: 'url', placeholder: 'https://', value: item?.image?.startsWith('http') ? item.image : '' }))
-      ),
-      item?.image && h('label', { class: 'check' }, h('input', { type: 'checkbox', name: 'removeImage', value: 'true' }), 'Remove current image'),
-      h('div', { class: 'row' }, h('button', { class: 'primary', type: 'submit' }, item ? 'Save item' : 'Add item'))
-    );
-
-  const editItem = (item) => {
-    const dlg = h('dialog', {}, h('div', { class: 'row spread' }, h('h2', {}, 'Edit item'), h('button', { class: 'ghost icon-btn', onclick: () => dlg.close(), 'aria-label': 'Close' }, '✕')), itemForm(item));
-    dlg.addEventListener('close', () => dlg.remove());
-    document.body.append(dlg);
-    dlg.showModal();
-  };
-
-  const itemTile = (item) =>
-    h(
-      'div',
-      { class: 'item-tile' },
-      thumb(item, 'img'),
-      h(
-        'div',
-        { class: 'body' },
-        h('strong', {}, item.title),
-        h('div', { class: 'stat' }, '♥ ', h('b', {}, item.likes), ' want · ✕ ', h('b', {}, item.passes), ' pass · ', h('b', {}, item.quantity), ' available'),
-        h(
-          'div',
-          { class: 'row', style: { marginTop: 'auto' } },
-          h('button', { onclick: () => editItem(item) }, 'Edit'),
-          h(
-            'button',
-            {
-              class: 'ghost',
-              onclick: action(async () => {
-                if (!(await confirmDialog(`Delete "${item.title}"?`))) return;
-                await api('DELETE', `/api/admin/items/${item.id}`);
-                refresh();
-              }),
-            },
-            '🗑'
-          )
-        )
+        'Delete collection'
       )
     );
-
-  // --- members ---
-  const memberIds = new Set(data.members.map((m) => m.id));
-  const swipedBy = new Map(data.members.map((m) => [m.id, m.swiped]));
-  const membersCard = h(
-    'form',
-    {
-      class: 'card',
-      onsubmit: action(async (e) => {
-        const ids = [...e.target.querySelectorAll('input[name=member]:checked')].map((el) => Number(el.value));
-        await api('PUT', `/api/admin/collections/${id}/members`, { userIds: ids });
-        toast('Participants saved');
-        refresh();
-      }),
-    },
-    users.length
-      ? users.map((u) =>
-          h(
-            'label',
-            { class: 'item-row check' },
-            h('input', { type: 'checkbox', name: 'member', value: u.id, checked: memberIds.has(u.id) }),
-            h(
-              'div',
-              { class: 'grow' },
-              h('div', { class: 'name' }, u.name, u.status === 'invited' ? ' (invited)' : ''),
-              h('div', { class: 'muted small' }, u.email)
-            ),
-            memberIds.has(u.id) && h('span', { class: 'muted small' }, `${swipedBy.get(u.id)}/${data.items.length} swiped`),
-            u.status === 'invited' && h('button', { type: 'button', onclick: (e) => { e.preventDefault(); inviteDialog(u); } }, '✉️')
-          )
-        )
-      : h('p', { class: 'muted' }, 'No people yet.'),
-    h('div', { class: 'row', style: { marginTop: '12px' } }, h('button', { class: 'primary', type: 'submit' }, 'Save participants'))
-  );
 
   // --- results ---
-  let results = null;
-  if (c.state === 'closed') {
+  const renderResults = () => {
     const byUser = new Map();
     for (const a of data.allocations) {
       if (!byUser.has(a.userId)) byUser.set(a.userId, { name: a.userName, list: [] });
@@ -1120,16 +1546,12 @@ async function viewAdminCollection(id) {
     }
     const allocatedCount = new Map();
     data.allocations.forEach((a) => allocatedCount.set(a.itemId, (allocatedCount.get(a.itemId) || 0) + 1));
-    const leftovers = data.items
-      .map((i) => ({ ...i, left: i.quantity - (allocatedCount.get(i.id) || 0) }))
-      .filter((i) => i.left > 0);
+    const leftovers = data.items.map((i) => ({ ...i, left: i.quantity - (allocatedCount.get(i.id) || 0) })).filter((i) => i.left > 0);
     const collected = data.allocations.filter((a) => a.collected).length;
-
-    results = h(
+    return h(
       'div',
-      { class: 'section' },
-      h('h2', {}, 'Results'),
-      h('p', { class: 'muted' }, `${data.allocations.length} items allocated · ${collected} collected. Tick items off as people pick them up.`),
+      {},
+      h('p', { class: 'muted' }, `${plural(data.allocations.length, 'item')} allocated · ${collected} collected. Tick items off as people pick them up.`),
       byUser.size
         ? h(
             'div',
@@ -1148,6 +1570,7 @@ async function viewAdminCollection(id) {
                       checked: a.collected,
                       onchange: action(async (e) => {
                         await api('PATCH', `/api/admin/allocations/${a.id}`, { collected: e.target.checked });
+                        a.collected = e.target.checked;
                       }),
                     }),
                     h('span', { class: 'grow' }, a.itemTitle)
@@ -1165,26 +1588,42 @@ async function viewAdminCollection(id) {
           h('div', { class: 'card' }, leftovers.map((i) => h('div', { class: 'item-row' }, thumb(i), h('div', { class: 'grow name' }, i.title), h('span', { class: 'muted small' }, `${i.left} left`))))
         )
     );
-  }
+  };
 
-  mount(
-    backBar('#/admin', c.name, countdown(c, { reload: true })),
-    c.state === 'draft' && h('p', { class: 'card small' }, '📝 This collection is a draft. Add items and people, then tick "Published" so participants can start swiping.'),
-    results,
-    h('div', { class: 'section' }, h('h2', {}, 'Details'), details),
-    h(
-      'div',
-      { class: 'section' },
-      h('h2', {}, `Items (${data.items.length})`),
-      h('div', { class: 'card' }, h('h3', {}, 'Add an item'), itemForm(null)),
-      data.items.length > 0 && h('div', { class: 'items-grid section' }, data.items.map(itemTile))
-    ),
-    h(
-      'div',
-      { class: 'section' },
-      h('h2', {}, `Participants (${data.members.length})`),
-      membersCard,
-      h('div', { class: 'section' }, inviteForm({ collectionId: id, onCreated: refresh }))
-    )
+  // --- tabs ---
+  const renderers = {
+    items: () => h('div', {}, itemsList),
+    people: renderPeople,
+    settings: renderSettings,
+    results: renderResults,
+  };
+  const body = h('div', {});
+  const tabBar = h(
+    'div',
+    { class: 'tabs', role: 'tablist' },
+    tabs.map(([key]) => h('button', { role: 'tab', 'data-tab': key, onclick: () => show(key) }))
   );
+  function show(key) {
+    current = key;
+    history.replaceState(null, '', `#/admin/c/${id}/${key}`);
+    tabBar.querySelectorAll('button').forEach((b) => b.classList.toggle('active', b.dataset.tab === key));
+    body.replaceChildren(renderers[key]());
+    const withBar = key === 'items' && canAddItems;
+    actionBar.hidden = !withBar;
+    $app.classList.toggle('has-action-bar', withBar);
+  }
+  viewCleanups.push(() => $app.classList.remove('has-action-bar'));
+
+  drawItems();
+  mount(
+    backBar('#/admin', c.name),
+    statusCard,
+    c.state === 'draft' && data.items.length === 0 &&
+      h('p', { class: 'muted small' }, '📝 Draft: add items and invite people, then tap Publish so they can start swiping.'),
+    tabBar,
+    body,
+    actionBar
+  );
+  drawCounts();
+  show(current);
 }

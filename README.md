@@ -14,9 +14,12 @@ can pick up.
 - When it closes: "You get N items" with the pickup status of each one
 
 **Admins**
-- Create collections with a name, description and closing time; keep them as drafts until published
-- Add items with a title, description, quantity and a photo (taken/uploaded, or an image URL).
-  Photos are shrunk in the browser before upload, so even big phone photos are quick
+- Create collections with a name, description and closing time (quick picks: 1 day, 3 days, 1 week, 2 weeks); keep them as drafts until you tap **Publish**
+- Built for adding items from a phone: tap **Take photo**, type a name, tap **Save & next photo**
+  and the camera opens again for the next item. Or pick several photos from the gallery and name
+  them in one list. Items upload in the background while you carry on, and photos are shrunk in
+  the browser first, so even big phone photos upload quickly. Items can also have a description,
+  a quantity, or an image link instead of a photo
 - See how many people want or pass on each item, and how far each participant has got
 - Invite people by name and email. You get an invite link to copy, email or share; the
   person sets their own password. Invite straight into a collection, or pick participants from everyone
