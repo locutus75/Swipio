@@ -15,7 +15,8 @@ can pick up.
 
 **Admins**
 - Create collections with a name, description and closing time; keep them as drafts until published
-- Add items with a title, description, quantity and a photo (upload or image URL)
+- Add items with a title, description, quantity and a photo (taken/uploaded, or an image URL).
+  Photos are shrunk in the browser before upload, so even big phone photos are quick
 - See how many people want or pass on each item, and how far each participant has got
 - Invite people by name and email. You get an invite link to copy, email or share; the
   person sets their own password. Invite straight into a collection, or pick participants from everyone
@@ -33,42 +34,87 @@ When a collection closes:
 
 See `src/allocation.js`.
 
-## Running it
+## How it fits together
 
-Requires **Node.js 22.5+** (it uses the built-in `node:sqlite`, so there are no native modules to compile).
+```
+ frontend (GitHub Pages)                    API (Cloudflare Worker)            database (Cloudflare D1)
+ ───────────────────────                    ───────────────────────            ────────────────────────
+ public/: plain HTML/CSS/JS,      ──►   src/api.js: /api/...          ──►   users, collections, items,
+ no build step. config.js says           login, swiping, admin,              swipes, allocations, photos
+ where the API is.                       allocation. A cron trigger
+                                         closes expired collections
+                                         every minute.
+```
+
+Same setup as SysCommander: the site is static on GitHub Pages and the server part is a
+Cloudflare Worker. D1's free tier is plenty. The only CPU-heavy step is hashing passwords at
+sign-up (about 15 ms), which suits the **Workers Paid** plan that SysCommander's referee already
+uses. On the Free plan (10 ms per request) set `PASSWORD_ITERATIONS = "50000"` in `wrangler.toml`.
+
+## Running it locally
+
+Requires Node.js 22.5+.
 
 ```bash
 npm install
-npm start          # http://localhost:3100
+npm run dev        # http://localhost:3100
 ```
 
+This runs the real Worker and a local D1 database (in `.wrangler/`) with Cloudflare's
+`wrangler` tool, and serves the frontend on the same port. No Cloudflare account is needed.
 On the first visit you create the admin account. Then create a collection, add items,
 invite people, and tick **Published**.
 
-### Configuration
-
-| Variable         | Default      | Purpose                                                          |
-| ---------------- | ------------ | ---------------------------------------------------------------- |
-| `PORT`           | `3100`       | HTTP port                                                        |
-| `DATA_DIR`       | `./data`     | Where the SQLite database and uploaded images are stored         |
-| `PUBLIC_URL`     | request host | Base URL used in invite links, e.g. `https://swipio.example.com` |
-| `SECURE_COOKIES` | `false`      | Set to `true` when served over HTTPS                             |
-
-Back up `DATA_DIR` to keep your data.
-
-## Development
-
 ```bash
-npm run dev   # restarts on file changes
-npm test      # allocation unit tests + API integration tests
+npm test           # allocation unit tests + API tests (runs the Worker against an in-memory database)
 ```
 
-- `server.js`: entry point; also closes expired collections every 30 seconds
-- `src/app.js`: Express app and REST API (`/api/...`)
-- `src/db.js`: SQLite schema
-- `src/allocation.js`: fair allocation algorithm
-- `public/`: the frontend, a single-page app in plain JavaScript with no build step
+## Deploying
 
-Security notes: passwords are hashed with scrypt; sessions are random tokens in an
-HttpOnly, SameSite=Lax cookie; every state-changing API call needs an
-`X-Requested-With: swipio` header as CSRF protection; uploads accept image types only, up to 8 MB.
+The workflow in `.github/workflows/deploy.yml` tests every push. On pushes to `main` it also
+deploys the API to Cloudflare and the frontend to GitHub Pages. One-time setup:
+
+1. **Cloudflare API token.** In the Cloudflare dashboard go to *My Profile > API Tokens >
+   Create Token*, use the **Edit Cloudflare Workers** template and add the permission
+   *Account > D1 > Edit*. Your **Account ID** is in the dashboard sidebar (Workers & Pages).
+2. **GitHub secrets.** In this repo go to *Settings > Secrets and variables > Actions* and add
+   the secrets `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`.
+3. **GitHub Pages.** In *Settings > Pages* set **Source** to **GitHub Actions**.
+4. **Push to `main`.** The first run creates the `swipio` D1 database, sets up its tables,
+   deploys the Worker (to `https://swipio.<your-subdomain>.workers.dev`) and publishes the site
+   to `https://locutus75.github.io/Swipio/`.
+
+Open the site and create the admin account. Do this straight away: until an admin exists,
+whoever opens the site first can claim it.
+
+### Custom domains
+
+- **Frontend:** add a `public/CNAME` file containing the domain (as SysCommander does) and set
+  it under *Settings > Pages*. Then add the domain to `ALLOWED_ORIGINS` in `wrangler.toml`, the
+  list of sites allowed to call the API.
+- **API:** add a custom domain to the Worker in Cloudflare, and set the repository **variable**
+  `SWIPIO_API_URL` (e.g. `https://api.swipio.example`) so the site uses it.
+
+### Deploying by hand
+
+```bash
+npx wrangler login
+npx wrangler d1 create swipio     # once; paste the database_id into wrangler.toml
+npm run deploy                    # applies migrations, deploys the Worker
+```
+
+Then set `apiUrl` in `public/config.js` to the Worker URL and publish `public/` anywhere static.
+
+## Project layout
+
+- `src/worker.js`: Worker entry point (HTTP and cron)
+- `src/api.js`: the REST API
+- `src/allocation.js`: fair allocation algorithm
+- `src/auth.js`: password hashing (PBKDF2) and tokens, using Web Crypto
+- `migrations/`: D1 database schema. Add a new numbered file for schema changes; the deploy applies it
+- `public/`: the frontend, a single-page app in plain JavaScript with no build step
+- `test/`: tests; `d1-shim.js` imitates D1 on top of `node:sqlite`
+
+Security notes: passwords are hashed with PBKDF2 (100,000 rounds by default); sessions are random bearer
+tokens, stored in the browser's localStorage and only as a SHA-256 hash in the database;
+`ALLOWED_ORIGINS` limits which sites may call the API; photos must be JPEG, PNG, GIF, WebP or AVIF, max 1.5 MB.

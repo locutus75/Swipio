@@ -1,5 +1,3 @@
-'use strict';
-
 /**
  * Decides who gets which item once a collection's timer has expired.
  *
@@ -13,7 +11,7 @@
  * @param {{items: {id:number, quantity:number}[], likes: {itemId:number, userId:number}[], seed: string|number}} input
  * @returns {{itemId:number, userId:number}[]}
  */
-function allocate({ items, likes, seed }) {
+export function allocate({ items, likes, seed }) {
   const rand = mulberry32(hashString(String(seed)));
   const likersByItem = new Map();
   for (const { itemId, userId } of likes) {
@@ -81,4 +79,3 @@ function mulberry32(a) {
   };
 }
 
-module.exports = { allocate };

@@ -1,8 +1,6 @@
-'use strict';
-
-const test = require('node:test');
-const assert = require('node:assert/strict');
-const { allocate } = require('../src/allocation');
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { allocate } from '../src/allocation.js';
 
 const byItem = (result) => {
   const map = {};

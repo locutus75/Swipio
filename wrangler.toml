@@ -1,0 +1,30 @@
+# Cloudflare Worker config for the Swipio API.
+name = "swipio"
+main = "src/worker.js"
+compatibility_date = "2026-09-01"
+
+# Also serves the frontend, so `npm run dev` gives you the whole app on one port.
+# In production the frontend is on GitHub Pages (see .github/workflows/deploy.yml).
+[assets]
+directory = "./public"
+
+[dev]
+port = 3100
+
+[[d1_databases]]
+binding = "DB"
+database_name = "swipio"
+# The deploy workflow fills this in automatically (it creates the database on first deploy).
+# For a manual deploy: `npx wrangler d1 create swipio` and paste the id here.
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "migrations"
+
+[vars]
+# Frontends allowed to call the API (comma separated). "*" allows any.
+ALLOWED_ORIGINS = "https://locutus75.github.io,http://localhost:3100"
+# PBKDF2 rounds for new passwords (max 100000). 100000 takes ~15 ms of CPU, fine on Workers Paid.
+# On the Workers Free plan (10 ms CPU per request) use 50000. Existing passwords keep working either way.
+PASSWORD_ITERATIONS = "100000"
+
+[triggers]
+crons = ["* * * * *"] # close expired collections every minute

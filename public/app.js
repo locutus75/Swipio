@@ -28,15 +28,61 @@ function h(tag, attrs, ...children) {
   return el;
 }
 
+// Where the API lives: set in config.js (empty means the same origin as this page).
+const API_URL = String((window.SWIPIO_CONFIG || {}).apiUrl || '').replace(/\/$/, '');
+const TOKEN_KEY = 'swipio_token';
+
+function getToken() {
+  try {
+    return localStorage.getItem(TOKEN_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function setToken(token) {
+  try {
+    if (token) localStorage.setItem(TOKEN_KEY, token);
+    else localStorage.removeItem(TOKEN_KEY);
+  } catch {
+    // storage unavailable (private mode): the session lasts until the page is closed
+  }
+  memoryToken = token;
+}
+let memoryToken = getToken();
+
+/** Stores the session from a login-type response and returns the user. */
+function signedIn(data) {
+  setToken(data.token);
+  me = data.user;
+  return me;
+}
+
+/** Turns an API-relative path (e.g. an uploaded image) into a full URL. */
+function apiAsset(path) {
+  return path && path.startsWith('/api/') ? API_URL + path : path;
+}
+
+function inviteLink(token) {
+  return `${location.origin}${location.pathname}#/invite/${token}`;
+}
+
 async function api(method, url, body) {
-  const opts = { method, headers: { 'X-Requested-With': 'swipio' }, credentials: 'same-origin' };
+  const opts = { method, headers: {} };
+  if (memoryToken) opts.headers.Authorization = `Bearer ${memoryToken}`;
   if (body instanceof FormData) opts.body = body;
   else if (body !== undefined) {
     opts.headers['Content-Type'] = 'application/json';
     opts.body = JSON.stringify(body);
   }
-  const res = await fetch(url, opts);
+  let res;
+  try {
+    res = await fetch(API_URL + url, opts);
+  } catch {
+    throw new Error('Cannot reach the Swipio server. Check your connection and try again.');
+  }
   const data = await res.json().catch(() => ({}));
+  if (res.status === 401 && memoryToken && !url.startsWith('/api/login')) setToken(null);
   if (!res.ok) {
     const err = new Error(data.error || `Request failed (${res.status})`);
     err.status = res.status;
@@ -130,9 +176,27 @@ setInterval(() => document.querySelectorAll('[data-expires]').forEach(updateCoun
 function thumb(item, cls = 'thumb', fallbackCls = cls) {
   const placeholder = () => h('div', { class: fallbackCls }, (item.title || '?').trim().charAt(0).toUpperCase());
   if (!item.image) return placeholder();
-  const img = h('img', { class: cls, src: item.image, alt: '', loading: 'lazy', draggable: false });
+  const img = h('img', { class: cls, src: apiAsset(item.image), alt: '', loading: 'lazy', draggable: false });
   img.addEventListener('error', () => img.replaceWith(placeholder()), { once: true });
   return img;
+}
+
+/** Shrinks a photo to at most 1200px and re-encodes it as JPEG, so uploads stay small. */
+async function resizeImage(file, max = 1200) {
+  if (file.type === 'image/gif') return file; // keep animations
+  let bitmap;
+  try {
+    bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
+  } catch {
+    throw new Error('That file could not be read as an image.');
+  }
+  const scale = Math.min(1, max / Math.max(bitmap.width, bitmap.height));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.round(bitmap.width * scale);
+  canvas.height = Math.round(bitmap.height * scale);
+  canvas.getContext('2d').drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  bitmap.close?.();
+  return new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.82));
 }
 
 function copy(text) {
@@ -160,7 +224,8 @@ function userMenu() {
         class: 'ghost',
         title: `Signed in as ${me.email}`,
         onclick: action(async () => {
-          await api('POST', '/api/logout');
+          await api('POST', '/api/logout').catch(() => {});
+          setToken(null);
           me = null;
           go('#/login');
         }),
@@ -264,7 +329,7 @@ async function viewSetup() {
         {
           class: 'stack',
           onsubmit: action(async (e) => {
-            me = (await api('POST', '/api/setup', formData(e.target))).user;
+            signedIn(await api('POST', '/api/setup', formData(e.target)));
             go('#/admin');
           }),
         },
@@ -292,7 +357,7 @@ async function viewLogin() {
         {
           class: 'stack',
           onsubmit: action(async (e) => {
-            me = (await api('POST', '/api/login', formData(e.target))).user;
+            signedIn(await api('POST', '/api/login', formData(e.target)));
             go('#/');
           }),
         },
@@ -326,7 +391,7 @@ async function viewInvite(token) {
         {
           class: 'stack',
           onsubmit: action(async (e) => {
-            me = (await api('POST', `/api/invites/${token}`, formData(e.target))).user;
+            signedIn(await api('POST', `/api/invites/${token}`, formData(e.target)));
             toast(`Welcome, ${me.name}!`);
             go('#/');
           }),
@@ -508,7 +573,7 @@ function renderDeck(c, items) {
       'dialog',
       {},
       h('h2', {}, item.title),
-      item.image && h('img', { src: item.image, alt: '', style: { width: '100%', borderRadius: '12px', marginBottom: '12px' } }),
+      item.image && h('img', { src: apiAsset(item.image), alt: '', style: { width: '100%', borderRadius: '12px', marginBottom: '12px' } }),
       item.quantity > 1 && h('p', {}, h('span', { class: 'badge' }, `${item.quantity} available`)),
       h('p', { style: { whiteSpace: 'pre-wrap' } }, item.description || 'No description.'),
       h('div', { class: 'row' }, h('button', { class: 'primary', onclick: () => dlg.close() }, 'Close'))
@@ -748,27 +813,28 @@ async function viewAdmin() {
 }
 
 function inviteDialog(user) {
+  const url = inviteLink(user.inviteToken);
   const dlg = h(
     'dialog',
     {},
     h('h2', {}, `Invite ${user.name}`),
     h('p', { class: 'muted' }, `Send this link to ${user.email}. It lets them set a password and expires ${formatDate(user.inviteExpiresAt)}.`),
-    h('div', { class: 'invite-link' }, user.inviteUrl),
+    h('div', { class: 'invite-link' }, url),
     h(
       'div',
       { class: 'row', style: { marginTop: '16px' } },
-      h('button', { class: 'primary', onclick: () => copy(user.inviteUrl) }, 'Copy link'),
+      h('button', { class: 'primary', onclick: () => copy(url) }, 'Copy link'),
       h(
         'a',
         {
           class: 'btn',
           href: `mailto:${encodeURIComponent(user.email)}?subject=${encodeURIComponent("You're invited to Swipio")}&body=${encodeURIComponent(
-            `Hi ${user.name},\n\nYou've been invited to swipe on items in Swipio. Set your password here:\n${user.inviteUrl}\n`
+            `Hi ${user.name},\n\nYou've been invited to swipe on items in Swipio. Set your password here:\n${url}\n`
           )}`,
         },
         'Email it'
       ),
-      navigator.share && h('button', { onclick: () => navigator.share({ title: 'Swipio invite', url: user.inviteUrl }).catch(() => {}) }, 'Share'),
+      navigator.share && h('button', { onclick: () => navigator.share({ title: 'Swipio invite', url: url }).catch(() => {}) }, 'Share'),
       h('button', { class: 'ghost', onclick: () => dlg.close() }, 'Done')
     )
   );
@@ -950,7 +1016,9 @@ async function viewAdminCollection(id) {
         class: 'stack',
         onsubmit: action(async (e) => {
           const fd = new FormData(e.target);
-          if (!fd.get('image') || !fd.get('image').size) fd.delete('image');
+          const file = fd.get('image');
+          fd.delete('image');
+          if (file && file.size) fd.set('image', await resizeImage(file), 'photo.jpg');
           if (item) await api('PATCH', `/api/admin/items/${item.id}`, fd);
           else await api('POST', `/api/admin/collections/${id}/items`, fd);
           e.target.closest('dialog')?.close();

@@ -2,19 +2,19 @@
   "name": "swipio",
   "version": "1.0.0",
   "description": "Tinder-style swiping for items: admins create collections, invited users swipe, and items are allocated when the timer runs out.",
-  "main": "server.js",
+  "main": "src/worker.js",
   "private": true,
   "engines": {
     "node": ">=22.5"
   },
   "scripts": {
-    "start": "node --disable-warning=ExperimentalWarning server.js",
-    "dev": "node --disable-warning=ExperimentalWarning --watch server.js",
-    "test": "node --disable-warning=ExperimentalWarning --test \"test/**/*.test.js\""
+    "dev": "wrangler d1 migrations apply swipio --local && wrangler dev",
+    "test": "node --disable-warning=ExperimentalWarning --test \"test/**/*.test.js\"",
+    "deploy": "wrangler d1 migrations apply swipio --remote && wrangler deploy"
   },
   "license": "MIT",
-  "dependencies": {
-    "express": "^5.2.1",
-    "multer": "^2.4.0"
-  }
+  "devDependencies": {
+    "wrangler": "^4.147.0"
+  },
+  "type": "module"
 }

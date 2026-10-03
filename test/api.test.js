@@ -1,58 +1,40 @@
-'use strict';
-
-const test = require('node:test');
-const assert = require('node:assert/strict');
-const os = require('node:os');
-const fs = require('node:fs');
-const path = require('node:path');
-const { openDb } = require('../src/db');
-const { createApp } = require('../src/app');
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { createApi } from '../src/api.js';
+import { createD1 } from './d1-shim.js';
 
 const HOUR = 3600 * 1000;
+const ORIGIN = 'https://locutus75.github.io';
 
-async function startServer() {
+function setup({ allowedOrigins = `${ORIGIN},http://localhost:3100` } = {}) {
   let clock = Date.parse('2026-01-01T12:00:00Z');
-  const uploadDir = fs.mkdtempSync(path.join(os.tmpdir(), 'swipio-test-'));
-  const app = createApp({ db: openDb(':memory:'), uploadDir, now: () => clock });
-  const server = await new Promise((resolve) => {
-    const s = app.listen(0, () => resolve(s));
-  });
-  const base = `http://127.0.0.1:${server.address().port}`;
+  const api = createApi({ now: () => clock });
+  const env = { DB: createD1(), ALLOWED_ORIGINS: allowedOrigins };
 
+  /** A client that remembers its session token, like a browser tab. */
   function client() {
-    let cookie = '';
+    let token = null;
     return async function call(method, url, body) {
-      const headers = { 'X-Requested-With': 'swipio' };
-      if (cookie) headers.Cookie = cookie;
+      const headers = { Origin: ORIGIN };
+      if (token) headers.Authorization = `Bearer ${token}`;
       let payload;
       if (body instanceof FormData) payload = body;
       else if (body !== undefined) {
         headers['Content-Type'] = 'application/json';
         payload = JSON.stringify(body);
       }
-      const res = await fetch(base + url, { method, headers, body: payload });
-      const setCookie = res.headers.get('set-cookie');
-      if (setCookie) cookie = setCookie.split(';')[0];
-      const data = await res.json().catch(() => null);
-      return { status: res.status, data };
+      const res = await api.fetch(new Request('https://api.test' + url, { method, headers, body: payload }), env);
+      const data = res.headers.get('Content-Type')?.includes('json') ? await res.json() : await res.arrayBuffer();
+      if (data && data.token) token = data.token;
+      return { status: res.status, data, headers: res.headers };
     };
   }
 
-  return {
-    base,
-    client,
-    advance: (ms) => (clock += ms),
-    now: () => clock,
-    close: () => {
-      server.close();
-      fs.rmSync(uploadDir, { recursive: true, force: true });
-    },
-  };
+  return { api, env, client, advance: (ms) => (clock += ms), now: () => clock };
 }
 
-test('full flow: setup, invite, swipe, expire, collect', async (t) => {
-  const srv = await startServer();
-  t.after(srv.close);
+test('full flow: setup, invite, swipe, expire, collect', async () => {
+  const srv = setup();
   const admin = srv.client();
 
   // First run setup
@@ -60,7 +42,8 @@ test('full flow: setup, invite, swipe, expire, collect', async (t) => {
   let r = await admin('POST', '/api/setup', { name: 'Ada', email: 'ada@example.com', password: 'supersecret' });
   assert.equal(r.status, 201);
   assert.equal(r.data.user.role, 'admin');
-  r = await admin('POST', '/api/setup', { name: 'Eve', email: 'eve@example.com', password: 'supersecret' });
+  assert.ok(r.data.token);
+  r = await srv.client()('POST', '/api/setup', { name: 'Eve', email: 'eve@example.com', password: 'supersecret' });
   assert.equal(r.status, 409, 'setup can only run once');
 
   // Collection with items
@@ -72,25 +55,34 @@ test('full flow: setup, invite, swipe, expire, collect', async (t) => {
   const fd = new FormData();
   fd.set('title', 'Lamp');
   fd.set('quantity', '1');
-  fd.set('image', new Blob([Buffer.from('fakepng')], { type: 'image/png' }), 'lamp.png');
+  fd.set('image', new Blob([new Uint8Array([1, 2, 3, 4])], { type: 'image/jpeg' }), 'lamp.jpg');
   r = await admin('POST', `/api/admin/collections/${cid}/items`, fd);
   assert.equal(r.status, 201);
   const lamp = r.data.item;
-  assert.match(lamp.image, /^\/uploads\/.+\.png$/);
-  assert.equal((await fetch(srv.base + lamp.image)).status, 200);
+  assert.match(lamp.image, /^\/api\/images\/\d+$/);
+  r = await admin('GET', lamp.image);
+  assert.equal(r.status, 200);
+  assert.equal(r.headers.get('Content-Type'), 'image/jpeg');
+  assert.deepEqual([...new Uint8Array(r.data)], [1, 2, 3, 4]);
+
+  const bad = new FormData();
+  bad.set('title', 'Script');
+  bad.set('image', new Blob(['<svg/>'], { type: 'image/svg+xml' }), 'x.svg');
+  assert.equal((await admin('POST', `/api/admin/collections/${cid}/items`, bad)).status, 400);
 
   r = await admin('POST', `/api/admin/collections/${cid}/items`, { title: 'Chair', quantity: 2 });
   const chair = r.data.item;
-  r = await admin('POST', `/api/admin/collections/${cid}/items`, { title: 'Plant' });
+  r = await admin('POST', `/api/admin/collections/${cid}/items`, { title: 'Plant', imageUrl: 'https://example.com/p.jpg' });
   const plant = r.data.item;
+  assert.equal(plant.image, 'https://example.com/p.jpg');
 
   // Invite two people straight into the collection
   r = await admin('POST', '/api/admin/users', { name: 'Bob', email: 'bob@example.com', collectionIds: [cid] });
   assert.equal(r.status, 201);
   assert.equal(r.data.user.status, 'invited');
-  const bobToken = r.data.user.inviteUrl.split('/invite/')[1];
+  const bobToken = r.data.user.inviteToken;
   r = await admin('POST', '/api/admin/users', { name: 'Cat', email: 'cat@example.com', collectionIds: [cid] });
-  const catToken = r.data.user.inviteUrl.split('/invite/')[1];
+  const catToken = r.data.user.inviteToken;
   r = await admin('POST', '/api/admin/users', { name: 'Dup', email: 'BOB@example.com' });
   assert.equal(r.status, 409);
 
@@ -163,33 +155,55 @@ test('full flow: setup, invite, swipe, expire, collect', async (t) => {
   r = await admin('POST', `/api/admin/collections/${cid}/close`);
   assert.equal(r.data.collection.state, 'closed');
   assert.equal((await admin('GET', `/api/admin/collections/${cid}`)).data.allocations.length, 4);
+
+  // Deleting the collection removes its uploaded images too
+  await admin('DELETE', `/api/admin/collections/${cid}`);
+  assert.equal((await admin('GET', lamp.image)).status, 404);
 });
 
-test('auth and CSRF protections', async (t) => {
-  const srv = await startServer();
-  t.after(srv.close);
+test('the cron trigger closes expired collections', async () => {
+  const srv = setup();
+  const admin = srv.client();
+  await admin('POST', '/api/setup', { name: 'Ada', email: 'ada@example.com', password: 'supersecret' });
+  const { data } = await admin('POST', '/api/admin/collections', { name: 'C', expiresAt: srv.now() + HOUR, published: true });
+  srv.advance(2 * HOUR);
+  await srv.api.scheduled({}, srv.env);
+  const row = await srv.env.DB.prepare('SELECT finalized_at FROM collections WHERE id = ?').bind(data.collection.id).first();
+  assert.equal(row.finalized_at, srv.now());
+});
+
+test('auth and CORS', async () => {
+  const srv = setup();
   const admin = srv.client();
   await admin('POST', '/api/setup', { name: 'Ada', email: 'ada@example.com', password: 'supersecret' });
 
   const anon = srv.client();
   assert.equal((await anon('GET', '/api/collections')).status, 401);
   assert.equal((await anon('POST', '/api/login', { email: 'ada@example.com', password: 'nope' })).status, 401);
-  assert.equal((await anon('POST', '/api/login', { email: 'ADA@example.com', password: 'supersecret' })).status, 200);
+  const r = await anon('POST', '/api/login', { email: 'ADA@example.com', password: 'supersecret' });
+  assert.equal(r.status, 200);
+  assert.equal(r.headers.get('Access-Control-Allow-Origin'), ORIGIN);
 
-  const res = await fetch(srv.base + '/api/login', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email: 'ada@example.com', password: 'supersecret' }),
-  });
-  assert.equal(res.status, 403, 'mutations without the custom header are rejected');
+  // A forged token gets nowhere
+  const res = await srv.api.fetch(
+    new Request('https://api.test/api/me', { headers: { Authorization: 'Bearer forged' } }),
+    srv.env
+  );
+  assert.equal(res.status, 401);
+
+  // Preflight from an unknown site gets no CORS headers
+  const pre = await srv.api.fetch(
+    new Request('https://api.test/api/login', { method: 'OPTIONS', headers: { Origin: 'https://evil.example' } }),
+    srv.env
+  );
+  assert.equal(pre.headers.get('Access-Control-Allow-Origin'), null);
 
   await admin('POST', '/api/logout');
   assert.equal((await admin('GET', '/api/me')).status, 401);
 });
 
-test('non-members cannot see or swipe a collection', async (t) => {
-  const srv = await startServer();
-  t.after(srv.close);
+test('non-members cannot see or swipe a collection', async () => {
+  const srv = setup();
   const admin = srv.client();
   await admin('POST', '/api/setup', { name: 'Ada', email: 'ada@example.com', password: 'supersecret' });
   const { data } = await admin('POST', '/api/admin/collections', {
@@ -200,7 +214,7 @@ test('non-members cannot see or swipe a collection', async (t) => {
   const item = (await admin('POST', `/api/admin/collections/${data.collection.id}/items`, { title: 'Thing' })).data.item;
   const invite = (await admin('POST', '/api/admin/users', { name: 'Zed', email: 'zed@example.com' })).data.user;
   const zed = srv.client();
-  await zed('POST', `/api/invites/${invite.inviteUrl.split('/invite/')[1]}`, { password: 'zedpassword' });
+  await zed('POST', `/api/invites/${invite.inviteToken}`, { password: 'zedpassword' });
 
   assert.equal((await zed('GET', `/api/collections/${data.collection.id}`)).status, 404);
   assert.equal((await zed('PUT', `/api/items/${item.id}/swipe`, { liked: true })).status, 404);
