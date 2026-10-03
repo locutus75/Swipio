@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const { openDb } = require('./src/db');
 const { createApp } = require('./src/app');
 
-const PORT = Number(process.env.PORT) || 3000;
+const PORT = Number(process.env.PORT) || 3100;
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(__dirname, 'data'));
 
 fs.mkdirSync(DATA_DIR, { recursive: true });

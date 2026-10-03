@@ -39,7 +39,7 @@ Requires **Node.js 22.5+** (it uses the built-in `node:sqlite`, so there are no 
 
 ```bash
 npm install
-npm start          # http://localhost:3000
+npm start          # http://localhost:3100
 ```
 
 On the first visit you create the admin account. Then create a collection, add items,
@@ -49,7 +49,7 @@ invite people, and tick **Published**.
 
 | Variable         | Default      | Purpose                                                          |
 | ---------------- | ------------ | ---------------------------------------------------------------- |
-| `PORT`           | `3000`       | HTTP port                                                        |
+| `PORT`           | `3100`       | HTTP port                                                        |
 | `DATA_DIR`       | `./data`     | Where the SQLite database and uploaded images are stored         |
 | `PUBLIC_URL`     | request host | Base URL used in invite links, e.g. `https://swipio.example.com` |
 | `SECURE_COOKIES` | `false`      | Set to `true` when served over HTTPS                             |
