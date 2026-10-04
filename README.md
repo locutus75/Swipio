@@ -18,8 +18,8 @@ can pick up.
 | Role | Can |
 | --- | --- |
 | **Participant** | Swipe on the collections they're invited to |
-| **Creator** | Also create and run **their own** collections: items and photos, deadline, publish, close, and pick participants from existing people. Sees totals (likes per item, how far people are), not who chose what |
-| **Manager** | Also see and run **all** collections, see **who chose what**, see results per person and track pickups, and invite/manage people up to Manager |
+| **Creator** | Also create and run **their own** collections, plus collections a manager shared with them: items and photos, deadline, publish, close, and pick participants from existing people. Sees totals (likes per item, how far people are), not who chose what |
+| **Manager** | Also see and run **all** collections, choose which creators may co-manage a collection, see **who chose what**, see results per person and track pickups, and invite/manage people up to Manager |
 | **Admin** | Everything, including making and managing other admins. The first account is the admin |
 
 **Creating collections**
@@ -35,6 +35,7 @@ can pick up.
 - Invite people by name and email. You get an invite link to copy, email or share; the
   person sets their own password. Invite straight into a collection, or from the People page
 - Per collection: what each person wants and passed on, and who wants each item
+- Per collection (Settings → *Who can manage this*): tick creators who may co-manage it. They can do everything its maker can, except delete it or change who else may manage it
 - Results page per person, with a checkbox to mark items as collected, plus a list of unclaimed items
 - Manage people: roles, password reset (gives a new invite link), delete
 

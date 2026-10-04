@@ -987,7 +987,8 @@ async function viewAdmin() {
               { class: 'card collection-card', href: `#/admin/c/${c.id}` },
               h('div', { class: 'row spread' }, h('h3', {}, c.name), countdown(c)),
               h('div', { class: 'muted small' }, `${plural(c.itemCount, 'item')} · ${plural(c.memberCount, 'person', 'people')} · closes ${formatDate(c.expiresAt)}`),
-              can('manager') && c.createdBy && c.createdBy.id !== me.id && h('div', { class: 'muted small' }, `by ${c.createdBy.name}`)
+              can('manager') && c.createdBy && c.createdBy.id !== me.id && h('div', { class: 'muted small' }, `by ${c.createdBy.name}`),
+              c.sharedWithMe && h('div', { class: 'small' }, h('span', { class: 'badge role-creator' }, `Shared with you${c.createdBy ? ` · made by ${c.createdBy.name}` : ''}`))
             )
           )
         : h('div', { class: 'empty' }, h('div', { class: 'big' }, '📦'), h('p', {}, can('manager') ? 'No collections yet. Create one, then snap photos of the items.' : "You haven't created any collections yet. Create one, then snap photos of the items."))
@@ -1595,7 +1596,51 @@ async function viewAdminCollection(id, tab) {
   };
 
   // --- settings ---
-  const renderSettings = () =>
+  // Who may manage this collection: its maker, managers/admins, and creators picked as editors.
+  const renderEditors = () => {
+    const owner = data.createdBy ? data.createdBy.name : 'someone who has since been removed';
+    const editorIds = new Set(data.editors.map((e) => e.id));
+    if (!data.canManageEditors) {
+      return h(
+        'div',
+        { class: 'card stack' },
+        h('h3', {}, 'Who can manage this'),
+        h('p', { class: 'muted small' }, `Made by ${data.createdBy?.id === me.id ? 'you' : owner}.`),
+        data.editors.length > 0 && h('p', { class: 'small' }, `Also managed by ${data.editors.map((e) => (e.id === me.id ? 'you' : e.name)).join(', ')}.`),
+        h('p', { class: 'muted small' }, 'Managers and admins can manage every collection. Ask one of them to add someone here.')
+      );
+    }
+    const creators = users.filter((u) => u.role === 'creator' && u.id !== data.createdBy?.id);
+    return h(
+      'form',
+      {
+        class: 'card stack',
+        onsubmit: action(async (e) => {
+          const ids = [...e.target.querySelectorAll('input[name=editor]:checked')].map((el) => Number(el.value));
+          await api('PUT', `/api/admin/collections/${id}/editors`, { userIds: ids });
+          toast('Saved who can manage this collection');
+          reopen('settings');
+        }),
+      },
+      h('h3', {}, 'Who can manage this'),
+      h('p', { class: 'muted small' }, `Made by ${data.createdBy?.id === me.id ? 'you' : owner}. Managers and admins can always manage it. Tick creators who may manage it too: items, deadline, participants, publishing. Only the maker and managers can delete it.`),
+      creators.length
+        ? creators.map((u) =>
+            h(
+              'label',
+              { class: 'item-row check' },
+              h('input', { type: 'checkbox', name: 'editor', value: u.id, checked: editorIds.has(u.id) }),
+              h('div', { class: 'grow' }, h('div', { class: 'name' }, u.name), h('div', { class: 'muted small' }, u.email))
+            )
+          )
+        : h('p', { class: 'muted small' }, 'There are no other creators yet. Give someone the Creator role under Manage → People first.'),
+      creators.length > 0 && h('button', { class: 'primary', type: 'submit' }, 'Save')
+    );
+  };
+
+  const renderSettings = () => h('div', { class: 'stack' }, renderDetails(), renderEditors());
+
+  const renderDetails = () =>
     h(
       'form',
       {
@@ -1621,7 +1666,7 @@ async function viewAdminCollection(id, tab) {
       h('label', {}, 'Description', h('textarea', { name: 'description', rows: 3 }, c.description)),
       h('label', { class: 'check' }, h('input', { type: 'checkbox', name: 'published', checked: c.published }), 'Published: invited people can see and swipe this collection'),
       h('button', { class: 'primary', type: 'submit' }, 'Save'),
-      h(
+      data.canDelete && h(
         'button',
         {
           type: 'button',

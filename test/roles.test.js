@@ -134,3 +134,52 @@ test('the new role sticks after a password reset and login', async () => {
   await cas('POST', `/api/invites/${r.data.user.inviteToken}`, { password: 'newpassword' });
   assert.equal((await cas('GET', '/api/me')).data.user.role, 'creator');
 });
+
+test("managers can let a creator co-manage someone else's collection", async () => {
+  const t = await team();
+  const cas = t.creator.client;
+  const kim = t.creator2.client;
+  const cid = (await cas('POST', '/api/admin/collections', { name: 'Cas stuff', expiresAt: t.srv.now() + HOUR })).data.collection.id;
+
+  // Kim has no access yet, and creators can't hand out edit rights themselves
+  assert.equal((await kim('GET', `/api/admin/collections/${cid}`)).status, 404);
+  assert.equal((await cas('PUT', `/api/admin/collections/${cid}/editors`, { userIds: [t.creator2.id] })).status, 403);
+
+  // Only creators can be editors: participants need the role first, managers already have access
+  let r = await t.manager.client('PUT', `/api/admin/collections/${cid}/editors`, { userIds: [t.participant.id] });
+  assert.equal(r.status, 400);
+  assert.match(r.data.error, /Creator role first/);
+  assert.equal((await t.manager.client('PUT', `/api/admin/collections/${cid}/editors`, { userIds: [t.manager.id] })).status, 400);
+
+  r = await t.manager.client('PUT', `/api/admin/collections/${cid}/editors`, { userIds: [t.creator2.id] });
+  assert.equal(r.status, 200);
+
+  // Kim now sees it as shared, and can manage it...
+  r = await kim('GET', '/api/admin/collections');
+  assert.deepEqual(r.data.collections.map((c) => [c.name, c.sharedWithMe]), [['Cas stuff', true]]);
+  r = await kim('GET', `/api/admin/collections/${cid}`);
+  assert.deepEqual(r.data.editors.map((e) => e.name), ['Kim']);
+  assert.equal(r.data.createdBy.name, 'Cas');
+  assert.equal(r.data.canDelete, false);
+  assert.equal(r.data.canManageEditors, false);
+  assert.equal((await kim('POST', `/api/admin/collections/${cid}/items`, { title: 'From Kim' })).status, 201);
+  assert.equal((await kim('PATCH', `/api/admin/collections/${cid}`, { name: 'Shared stuff' })).status, 200);
+  assert.equal((await kim('PUT', `/api/admin/collections/${cid}/members`, { userIds: [t.participant.id] })).status, 200);
+  // ...but not delete it or change who else may edit it
+  assert.equal((await kim('DELETE', `/api/admin/collections/${cid}`)).status, 403);
+  assert.equal((await kim('PUT', `/api/admin/collections/${cid}/editors`, { userIds: [] })).status, 403);
+  assert.equal((await cas('GET', `/api/admin/collections/${cid}`)).data.canDelete, true);
+
+  // Revoking takes access away again
+  await t.admin('PUT', `/api/admin/collections/${cid}/editors`, { userIds: [] });
+  assert.equal((await kim('GET', `/api/admin/collections/${cid}`)).status, 404);
+  assert.deepEqual((await kim('GET', '/api/admin/collections')).data.collections, []);
+});
+
+test('an editor who is demoted to participant loses access', async () => {
+  const t = await team();
+  const cid = (await t.creator.client('POST', '/api/admin/collections', { name: 'C', expiresAt: t.srv.now() + HOUR })).data.collection.id;
+  await t.manager.client('PUT', `/api/admin/collections/${cid}/editors`, { userIds: [t.creator2.id] });
+  await t.manager.client('PATCH', `/api/admin/users/${t.creator2.id}`, { role: 'participant' });
+  assert.equal((await t.creator2.client('GET', `/api/admin/collections/${cid}`)).status, 403);
+});

@@ -29,3 +29,16 @@ test('0002_roles upgrades an existing database without losing data', () => {
   }
   assert.throws(() => db.exec("UPDATE users SET access_role = 'king' WHERE id = 2"), /CHECK/);
 });
+
+test('0003_collection_editors applies on top of 0002', () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec('PRAGMA foreign_keys = ON;');
+  for (const f of ['0001_init.sql', '0002_roles.sql', '0003_collection_editors.sql']) db.exec(sql(f));
+  db.exec(`
+    INSERT INTO users (id, name, email, created_at) VALUES (1, 'Cas', 'cas@x', 0);
+    INSERT INTO collections (id, name, expires_at, created_at) VALUES (1, 'C', 0, 0);
+    INSERT INTO collection_editors VALUES (1, 1);
+    DELETE FROM collections WHERE id = 1;
+  `);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM collection_editors').get().n, 0, 'cascades with the collection');
+});

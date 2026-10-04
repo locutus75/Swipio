@@ -196,10 +196,21 @@ export function createApi({ now = Date.now } = {}) {
     return c;
   }
 
-  /** Returns the collection if the current user may manage it: managers all, creators their own. */
-  async function managedCollection(ctx, id) {
+  /**
+   * Returns the collection if the current user may manage it: managers and admins all of them,
+   * creators the ones they made or were made an editor of. Deleting is for the maker and managers+.
+   */
+  async function managedCollection(ctx, id, { toDelete = false } = {}) {
     const c = await getCollection(ctx.db, id);
-    if (!atLeast(ctx.user, 'manager') && c.created_by !== ctx.user.id) throw new HttpError(404, 'Collection not found');
+    if (atLeast(ctx.user, 'manager') || c.created_by === ctx.user.id) return c;
+    const editor = await first(
+      ctx.db,
+      'SELECT 1 AS ok FROM collection_editors WHERE collection_id = ? AND user_id = ?',
+      c.id,
+      ctx.user.id
+    );
+    if (!editor) throw new HttpError(404, 'Collection not found');
+    if (toDelete) throw new HttpError(403, 'Only the person who made this collection or a manager can delete it');
     return c;
   }
 
@@ -521,6 +532,7 @@ export function createApi({ now = Date.now } = {}) {
               (SELECT COUNT(*) FROM collection_members m WHERE m.collection_id = c.id) AS member_count
          FROM collections c LEFT JOIN users u ON u.id = c.created_by
         WHERE ?1 OR c.created_by = ?2
+           OR EXISTS (SELECT 1 FROM collection_editors e WHERE e.collection_id = c.id AND e.user_id = ?2)
         ORDER BY c.created_at DESC`,
       atLeast(user, 'manager') ? 1 : 0,
       user.id
@@ -531,6 +543,7 @@ export function createApi({ now = Date.now } = {}) {
         itemCount: c.item_count,
         memberCount: c.member_count,
         createdBy: c.created_by ? { id: c.created_by, name: c.creator_name } : null,
+        sharedWithMe: !atLeast(user, 'manager') && c.created_by !== user.id,
       })),
     };
   });
@@ -558,7 +571,7 @@ export function createApi({ now = Date.now } = {}) {
     const { db } = ctx;
     const c = await managedCollection(ctx, ctx.params.id);
     const seeChoices = atLeast(ctx.user, 'manager');
-    const [items, members, allocations, swipes] = await Promise.all([
+    const [items, members, allocations, swipes, editors, creator] = await Promise.all([
       all(
         db,
         `SELECT i.*,
@@ -596,10 +609,21 @@ export function createApi({ now = Date.now } = {}) {
             c.id
           )
         : [],
+      all(
+        db,
+        `SELECT u.id, u.name, u.email FROM collection_editors e JOIN users u ON u.id = e.user_id
+          WHERE e.collection_id = ? ORDER BY u.name COLLATE NOCASE`,
+        c.id
+      ),
+      c.created_by ? first(db, 'SELECT id, name FROM users WHERE id = ?', c.created_by) : null,
     ]);
     return {
       collection: serializeCollection(c),
       seeChoices,
+      createdBy: creator ? { id: creator.id, name: creator.name } : null,
+      editors,
+      canDelete: seeChoices || c.created_by === ctx.user.id,
+      canManageEditors: seeChoices,
       items: items.map((i) => ({ ...serializeItem(i), likes: i.likes, passes: i.passes, allocated: i.allocated })),
       members: members.map((u) => {
         const m = { ...adminUser(u), swiped: u.swiped };
@@ -655,7 +679,7 @@ export function createApi({ now = Date.now } = {}) {
 
   route('DELETE', '/api/admin/collections/:id', { role: 'creator' }, async (ctx) => {
     const { db } = ctx;
-    const c = await managedCollection(ctx, ctx.params.id);
+    const c = await managedCollection(ctx, ctx.params.id, { toDelete: true });
     await db.batch([
       db
         .prepare('DELETE FROM images WHERE id IN (SELECT image_id FROM items WHERE collection_id = ? AND image_id IS NOT NULL)')
@@ -676,6 +700,32 @@ export function createApi({ now = Date.now } = {}) {
     const add = db.prepare('INSERT INTO collection_members (collection_id, user_id) VALUES (?, ?)');
     await db.batch([
       db.prepare('DELETE FROM collection_members WHERE collection_id = ?').bind(c.id),
+      ...ids.map((id) => add.bind(c.id, id)),
+    ]);
+    return { ok: true, userIds: ids };
+  });
+
+  // Managers and admins choose which creators may also manage this collection.
+  route('PUT', '/api/admin/collections/:id/editors', { role: 'manager' }, async (ctx) => {
+    const { db, body } = ctx;
+    const c = await getCollection(db, ctx.params.id);
+    if (!Array.isArray(body.userIds)) throw new HttpError(400, 'userIds must be an array');
+    const ids = [...new Set(body.userIds.map(Number))].filter((id) => id !== c.created_by);
+    for (const id of ids) {
+      const u = await first(db, 'SELECT name, access_role FROM users WHERE id = ?', id);
+      if (!u) throw new HttpError(400, `Unknown user ${id}`);
+      if (u.access_role !== 'creator') {
+        throw new HttpError(
+          400,
+          u.access_role === 'participant'
+            ? `${u.name} is a participant. Give them the Creator role first.`
+            : `${u.name} can already manage every collection.`
+        );
+      }
+    }
+    const add = db.prepare('INSERT INTO collection_editors (collection_id, user_id) VALUES (?, ?)');
+    await db.batch([
+      db.prepare('DELETE FROM collection_editors WHERE collection_id = ?').bind(c.id),
       ...ids.map((id) => add.bind(c.id, id)),
     ]);
     return { ok: true, userIds: ids };
