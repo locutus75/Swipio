@@ -189,3 +189,33 @@ test('admins can block and unblock accounts', async () => {
   // Making someone admin
   assert.equal((await w.admin('PATCH', `/api/admin/users/${bobId}`, { role: 'admin' })).data.user.role, 'admin');
 });
+
+test('co-managers can be set to manage only, without liking', async () => {
+  const w = await world();
+  const { cid, item } = await annasCollection(w);
+  await w.anna.c('POST', '/api/admin/users', { name: 'Bob', email: 'bob@example.com', collectionIds: [cid] });
+  await w.bob.c('PUT', `/api/items/${item.id}/swipe`, { liked: true });
+  assert.equal((await w.anna.c('PUT', `/api/admin/collections/${cid}/editors`, { editors: [{ id: w.bob.id, canLike: false }] })).status, 200);
+
+  let d = (await w.anna.c('GET', `/api/admin/collections/${cid}`)).data;
+  assert.deepEqual(d.editors.map((e) => [e.name, e.canLike]), [['Bob', false]]);
+  assert.equal(d.members.find((m) => m.id === w.bob.id).canLike, false);
+  // Bob can still manage it, but not swipe on it
+  assert.equal((await w.bob.c('GET', `/api/admin/collections/${cid}`)).status, 200);
+  assert.deepEqual((await w.bob.c('GET', '/api/collections')).data.collections, []);
+  assert.equal((await w.bob.c('GET', `/api/collections/${cid}`)).status, 404);
+  assert.equal((await w.bob.c('PUT', `/api/items/${item.id}/swipe`, { liked: true })).status, 404);
+  assert.equal((await w.anna.c('PUT', `/api/admin/collections/${cid}/choices`, { userId: w.bob.id, itemId: item.id, liked: true })).status, 400);
+  // His earlier like doesn't count
+  await w.anna.c('POST', `/api/admin/collections/${cid}/close`);
+  d = (await w.anna.c('GET', `/api/admin/collections/${cid}`)).data;
+  assert.deepEqual(d.allocations, []);
+
+  // Switched back on: he can like again; the plain userIds form keeps likes on
+  await w.anna.c('PUT', `/api/admin/collections/${cid}/editors`, { userIds: [w.bob.id] });
+  d = (await w.anna.c('GET', `/api/admin/collections/${cid}`)).data;
+  assert.equal(d.editors[0].canLike, true);
+  assert.equal((await w.anna.c('POST', `/api/admin/collections/${cid}/reallocate`, {})).status, 200);
+  d = (await w.anna.c('GET', `/api/admin/collections/${cid}`)).data;
+  assert.deepEqual(d.allocations.map((a) => a.userName), ['Bob']);
+});

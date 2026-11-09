@@ -1823,7 +1823,11 @@ async function viewAdminCollection(id, tab) {
                 'label',
                 { class: 'item-row check' },
                 h('input', { type: 'checkbox', name: 'member', value: u.id, checked: memberIds.has(u.id) }),
-                h('div', { class: 'grow' }, h('div', { class: 'name' }, u.name, u.status === 'invited' ? ' (invited)' : ''), h('div', { class: 'muted small' }, u.email)),
+                h('div', { class: 'grow' },
+                  h('div', { class: 'name' }, u.name, u.status === 'invited' ? ' (invited)' : ''),
+                  h('div', { class: 'muted small' }, u.email),
+                  data.members.some((m) => m.id === u.id && m.canLike === false) && h('span', { class: 'badge', title: 'Co-manager without likes (see Settings)' }, 'Manages only · no likes')
+                ),
                 memberIds.has(u.id) && !data.seeChoices && h('span', { class: 'muted small' }, `${swipedBy.get(u.id)}/${data.items.length}`),
                 memberIds.has(u.id) && data.seeChoices &&
                   h('button', {
@@ -1847,6 +1851,7 @@ async function viewAdminCollection(id, tab) {
   const renderEditors = () => {
     const owner = data.createdBy ? data.createdBy.name : 'someone who has since been removed';
     const editorIds = new Set(data.editors.map((e) => e.id));
+    const editorCanLike = new Map(data.editors.map((e) => [e.id, e.canLike !== false]));
     if (!data.canManageEditors) {
       return h(
         'div',
@@ -1863,23 +1868,44 @@ async function viewAdminCollection(id, tab) {
       {
         class: 'card stack',
         onsubmit: action(async (e) => {
-          const ids = [...e.target.querySelectorAll('input[name=editor]:checked')].map((el) => Number(el.value));
-          await api('PUT', `/api/admin/collections/${id}/editors`, { userIds: ids });
+          const editors = [...e.target.querySelectorAll('input[name=editor]:checked')].map((el) => ({
+            id: Number(el.value),
+            canLike: e.target.querySelector(`input[name="canlike-${el.value}"]`).checked,
+          }));
+          await api('PUT', `/api/admin/collections/${id}/editors`, { editors });
           toast('Saved who can manage this collection');
           reopen('settings');
         }),
       },
       h('h3', {}, 'Who can manage this'),
       h('p', { class: 'muted small' }, `Made by ${data.createdBy?.id === me.id ? 'you' : owner}. Tick participants who may help manage it: items, deadline, participants, results and hand-outs. Only the maker can delete or reopen it, or change this list.`),
+      h('p', { class: 'muted small' }, 'For each co-manager, the ♥ Likes switch says whether they may also like items themselves. Off: they only manage, the collection is not in their swipe list and they get no items.'),
       creators.length
-        ? creators.map((u) =>
-            h(
+        ? creators.map((u) => {
+            const editor = h('input', { type: 'checkbox', name: 'editor', value: u.id, checked: editorIds.has(u.id) });
+            const likeSwitch = h('input', { type: 'checkbox', role: 'switch', name: `canlike-${u.id}`, checked: editorCanLike.get(u.id) ?? true });
+            const state = h('span', { class: 'switch-state' });
+            const paint = () => (state.textContent = likeSwitch.checked ? 'On' : 'Off');
+            likeSwitch.addEventListener('change', paint);
+            paint();
+            const switchLabel = h(
               'label',
-              { class: 'item-row check' },
-              h('input', { type: 'checkbox', name: 'editor', value: u.id, checked: editorIds.has(u.id) }),
-              h('div', { class: 'grow' }, h('div', { class: 'name' }, u.name), h('div', { class: 'muted small' }, u.email))
-            )
-          )
+              { class: 'switch', title: 'May this co-manager also like items in this collection?' },
+              h('span', { class: 'switch-text' }, '♥ Likes'),
+              likeSwitch,
+              h('span', { class: 'slider', 'aria-hidden': 'true' }),
+              state
+            );
+            const showSwitch = () => (switchLabel.style.visibility = editor.checked ? 'visible' : 'hidden');
+            editor.addEventListener('change', showSwitch);
+            showSwitch();
+            return h(
+              'div',
+              { class: 'item-row editor-row' },
+              h('label', { class: 'check grow' }, editor, h('div', { class: 'grow' }, h('div', { class: 'name' }, u.name), h('div', { class: 'muted small' }, u.email))),
+              switchLabel
+            );
+          })
         : h('p', { class: 'muted small' }, 'Add people under the People tab first; then you can pick co-managers from them here.'),
       creators.length > 0 && h('button', { class: 'primary', type: 'submit' }, 'Save')
     );
@@ -1913,6 +1939,7 @@ async function viewAdminCollection(id, tab) {
       h('label', {}, 'Swiping closes', deadlinePicker(c.expiresAt)),
       h('label', {}, 'Description', h('textarea', { name: 'description', rows: 3 }, c.description)),
       h('label', { class: 'check' }, h('input', { type: 'checkbox', name: 'published', checked: c.published }), 'Published: invited people can see and swipe this collection'),
+      h('div', { class: 'row spread' },
       h('button', { class: 'primary', type: 'submit' }, 'Save'),
       data.canDelete && h(
         'button',
@@ -1926,7 +1953,7 @@ async function viewAdminCollection(id, tab) {
           }),
         },
         'Delete collection'
-      )
+      ))
     );
 
   // --- results ---

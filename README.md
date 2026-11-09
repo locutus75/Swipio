@@ -21,7 +21,9 @@ can pick up.
 - The maker has full control over their collection: items, deadline, participants, who chose what,
   results, hand-outs and pickups, reopening and deleting (*Settings → Delete collection*)
 - **Co-managers** (Settings → *Who can manage this*, picked from the collection's participants) can
-  do the same, except delete or reopen it, or change who else may manage it
+  do the same, except delete or reopen it, or change who else may manage it. Per co-manager the
+  **♥ Likes** switch says whether they may also like items themselves; switched off they only manage
+  (the collection isn't in their swipe list and their likes don't count in the allocation)
 - Invite people by name and email. Someone who already has an account is added straight away;
   anyone else gets an invite link to copy, email or share, and sets their own password
 - **Admins** run the platform: they see and can manage every collection, and manage all accounts

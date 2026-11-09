@@ -66,6 +66,7 @@ export function createApi({ now = Date.now } = {}) {
          JOIN collection_members m ON m.collection_id = i.collection_id AND m.user_id = s.user_id
         WHERE i.collection_id = ? AND s.liked = 1
           AND NOT EXISTS (SELECT 1 FROM allocation_exclusions x WHERE x.item_id = s.item_id AND x.user_id = s.user_id)
+          AND NOT EXISTS (SELECT 1 FROM collection_editors ne WHERE ne.collection_id = i.collection_id AND ne.user_id = s.user_id AND ne.can_like = 0)
         ORDER BY s.created_at`,
       collectionId
     );
@@ -326,12 +327,16 @@ export function createApi({ now = Date.now } = {}) {
     return u;
   }
 
+  /** SQL: true unless this member is a co-manager who may not like items (manage only). */
+  const mayLike = (collectionCol, userCol) =>
+    `NOT EXISTS (SELECT 1 FROM collection_editors ne WHERE ne.collection_id = ${collectionCol} AND ne.user_id = ${userCol} AND ne.can_like = 0)`;
+
   /** Returns the collection if the current user may participate in it. */
   async function memberCollection(ctx, collectionId) {
     const c = await getCollection(ctx.db, collectionId);
     const member = await first(
       ctx.db,
-      'SELECT 1 AS ok FROM collection_members WHERE collection_id = ? AND user_id = ?',
+      `SELECT 1 AS ok FROM collection_members m WHERE m.collection_id = ? AND m.user_id = ? AND ${mayLike('m.collection_id', 'm.user_id')}`,
       c.id,
       ctx.user.id
     );
@@ -590,7 +595,7 @@ export function createApi({ now = Date.now } = {}) {
                 WHERE i.collection_id = c.id AND a.user_id = ?1) AS won_count
          FROM collections c
          JOIN collection_members m ON m.collection_id = c.id AND m.user_id = ?1
-        WHERE c.published = 1
+        WHERE c.published = 1 AND ${mayLike('c.id', '?1')}
         ORDER BY c.finalized_at IS NOT NULL, c.expires_at`,
       user.id
     );
@@ -846,7 +851,7 @@ export function createApi({ now = Date.now } = {}) {
         : [],
       all(
         db,
-        `SELECT u.id, u.name, u.email FROM collection_editors e JOIN users u ON u.id = e.user_id
+        `SELECT u.id, u.name, u.email, e.can_like FROM collection_editors e JOIN users u ON u.id = e.user_id
           WHERE e.collection_id = ? ORDER BY u.name COLLATE NOCASE`,
         c.id
       ),
@@ -865,7 +870,7 @@ export function createApi({ now = Date.now } = {}) {
       collection: serializeCollection(c),
       seeChoices,
       createdBy: creator ? { id: creator.id, name: creator.name } : null,
-      editors,
+      editors: editors.map((e) => ({ id: e.id, name: e.name, email: e.email, canLike: e.can_like !== 0 })),
       allocationRound: c.allocation_round || 0,
       canReopen: canReopen(ctx.user, c),
       removed: exclusions.map((x) => ({ userId: x.user_id, userName: x.user_name, itemId: x.item_id, itemTitle: x.item_title })),
@@ -874,7 +879,11 @@ export function createApi({ now = Date.now } = {}) {
       canDelete: ownerRights,
       canManageEditors: ownerRights,
       items: items.map((i) => ({ ...serializeItem(i), likes: i.likes, passes: i.passes, allocated: i.allocated })),
-      members: members.map((u) => ({ ...userFor(ctx, u), swiped: u.swiped })),
+      members: members.map((u) => ({
+        ...userFor(ctx, u),
+        swiped: u.swiped,
+        canLike: !editors.some((e) => e.id === u.id && e.can_like === 0),
+      })),
       choices: swipes.map((s) => ({ userId: s.user_id, itemId: s.item_id, liked: !!s.liked })),
       allocations: (seeChoices ? allocations : []).map((a) => ({
         id: a.id,
@@ -985,6 +994,9 @@ export function createApi({ now = Date.now } = {}) {
     if (!item) throw new HttpError(404, 'Item not found in this collection');
     const member = await first(db, 'SELECT 1 AS ok FROM collection_members WHERE collection_id = ? AND user_id = ?', c.id, userId);
     if (!member) throw new HttpError(400, 'That person is not a participant of this collection');
+    if (await first(db, 'SELECT 1 AS ok FROM collection_editors WHERE collection_id = ? AND user_id = ? AND can_like = 0', c.id, userId)) {
+      throw new HttpError(400, 'This co-manager may not like items in this collection');
+    }
     if (body.liked === null) {
       await run(db, 'DELETE FROM swipes WHERE user_id = ? AND item_id = ?', userId, itemId);
     } else if (typeof body.liked === 'boolean') {
@@ -1150,16 +1162,23 @@ export function createApi({ now = Date.now } = {}) {
   route('PUT', '/api/admin/collections/:id/editors', { auth: true }, async (ctx) => {
     const { db, body } = ctx;
     const c = await managedCollection(ctx, ctx.params.id, { ownerOnly: true });
-    if (!Array.isArray(body.userIds)) throw new HttpError(400, 'userIds must be an array');
-    const ids = [...new Set(body.userIds.map(Number))].filter((id) => id !== c.created_by);
+    // Either { userIds: [...] } or { editors: [{ id, canLike }] }; canLike defaults to true.
+    const list = Array.isArray(body.editors)
+      ? body.editors.map((e) => ({ id: Number(e?.id), canLike: e?.canLike !== false }))
+      : Array.isArray(body.userIds)
+        ? body.userIds.map((id) => ({ id: Number(id), canLike: true }))
+        : null;
+    if (!list) throw new HttpError(400, 'userIds must be an array');
+    const canLike = new Map(list.filter((e) => e.id !== c.created_by).map((e) => [e.id, e.canLike]));
+    const ids = [...canLike.keys()];
     for (const id of ids) {
       const member = await first(db, 'SELECT 1 AS ok FROM collection_members WHERE collection_id = ? AND user_id = ?', c.id, id);
       if (!member) throw new HttpError(400, 'Only participants of this collection can be made co-managers');
     }
-    const add = db.prepare('INSERT INTO collection_editors (collection_id, user_id) VALUES (?, ?)');
+    const add = db.prepare('INSERT INTO collection_editors (collection_id, user_id, can_like) VALUES (?, ?, ?)');
     await db.batch([
       db.prepare('DELETE FROM collection_editors WHERE collection_id = ?').bind(c.id),
-      ...ids.map((id) => add.bind(c.id, id)),
+      ...ids.map((id) => add.bind(c.id, id, canLike.get(id) ? 1 : 0)),
     ]);
     return { ok: true, userIds: ids };
   });
