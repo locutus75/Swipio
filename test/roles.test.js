@@ -418,3 +418,57 @@ test('only the newest 30 versions are kept', async () => {
   for (let i = 0; i < 32; i++) await t.admin('POST', `/api/admin/collections/${cid}/reallocate`, { onlyFree: true });
   assert.equal((await t.admin('GET', `/api/admin/collections/${cid}/allocation/versions`)).data.versions.length, 30);
 });
+
+test('reopening: only admins and the maker, keeps picked-up items, new items get swiped', async () => {
+  const t = await team();
+  const cas = t.creator.client;
+  const cid = (await cas('POST', '/api/admin/collections', { name: 'Cas stuff', expiresAt: t.srv.now() + HOUR, published: true })).data.collection.id;
+  const bike = (await cas('POST', `/api/admin/collections/${cid}/items`, { title: 'Bike' })).data.item;
+  const lamp = (await cas('POST', `/api/admin/collections/${cid}/items`, { title: 'Lamp' })).data.item;
+  await cas('PUT', `/api/admin/collections/${cid}/members`, { userIds: [t.participant.id] });
+  await t.participant.client('PUT', `/api/items/${bike.id}/swipe`, { liked: true });
+  await t.participant.client('PUT', `/api/items/${lamp.id}/swipe`, { liked: true });
+  await cas('POST', `/api/admin/collections/${cid}/close`);
+  // Pim picked up the bike
+  const d = (await t.admin('GET', `/api/admin/collections/${cid}`)).data;
+  await t.admin('PATCH', `/api/admin/allocations/${d.allocations.find((a) => a.itemTitle === 'Bike').id}`, { collected: true });
+
+  const later = t.srv.now() + 2 * HOUR;
+  // A co-editor and a manager who didn't make it may not reopen (also not via the deadline)
+  await t.manager.client('PUT', `/api/admin/collections/${cid}/editors`, { userIds: [t.creator2.id] });
+  assert.equal((await t.creator2.client('POST', `/api/admin/collections/${cid}/reopen`, { expiresAt: later })).status, 403);
+  assert.equal((await t.manager.client('POST', `/api/admin/collections/${cid}/reopen`, { expiresAt: later })).status, 403);
+  assert.equal((await t.manager.client('PATCH', `/api/admin/collections/${cid}`, { expiresAt: later })).status, 403);
+  assert.equal((await t.manager.client('GET', `/api/admin/collections/${cid}`)).data.canReopen, false);
+  assert.equal((await cas('GET', `/api/admin/collections/${cid}`)).data.canReopen, true);
+  // A deadline in the past is refused
+  assert.equal((await cas('POST', `/api/admin/collections/${cid}/reopen`, { expiresAt: t.srv.now() - 1 })).status, 400);
+
+  // The maker reopens; a version is saved, the bike stays with Pim, the lamp is up for grabs again
+  let r = await cas('POST', `/api/admin/collections/${cid}/reopen`, { expiresAt: later });
+  assert.equal(r.status, 200);
+  assert.equal(r.data.collection.state, 'open');
+  const versions = (await t.admin('GET', `/api/admin/collections/${cid}/allocation/versions`)).data.versions;
+  assert.equal(versions[0].label, 'Before reopening');
+  let view = (await t.participant.client('GET', `/api/collections/${cid}`)).data;
+  assert.deepEqual(view.items.filter((i) => i.won).map((i) => i.title), ['Bike']);
+  assert.equal(view.items.find((i) => i.title === 'Bike').available, 0);
+
+  // New item: only it needs swiping; earlier choices are kept and can still be changed
+  const vase = (await cas('POST', `/api/admin/collections/${cid}/items`, { title: 'Vase' })).data.item;
+  view = (await t.participant.client('GET', `/api/collections/${cid}`)).data;
+  assert.deepEqual(view.items.filter((i) => i.swipe === null).map((i) => i.title), ['Vase']);
+  assert.equal((await t.participant.client('PUT', `/api/items/${lamp.id}/swipe`, { liked: false })).status, 200);
+  await t.participant.client('PUT', `/api/items/${vase.id}/swipe`, { liked: true });
+
+  // At the new deadline: bike stays (picked up), lamp no longer wanted, vase goes to Pim
+  t.srv.advance(3 * HOUR);
+  view = (await t.participant.client('GET', `/api/collections/${cid}`)).data;
+  assert.equal(view.collection.state, 'closed');
+  assert.deepEqual(view.items.filter((i) => i.won).map((i) => i.title).sort(), ['Bike', 'Vase']);
+  r = (await t.admin('GET', `/api/admin/collections/${cid}`)).data;
+  assert.equal(r.allocations.find((a) => a.itemTitle === 'Bike').collected, true);
+
+  // Admins can reopen any collection
+  assert.equal((await t.admin('POST', `/api/admin/collections/${cid}/reopen`, { expiresAt: t.srv.now() + HOUR })).status, 200);
+});

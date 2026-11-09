@@ -541,7 +541,9 @@ async function viewCollection(id, tab) {
 
   if (c.state === 'closed') return renderResults(c, items);
 
-  const deckItems = items.filter((i) => i.swipe === null);
+  // After a reopen, items that were all picked up already are not shown again.
+  const toSwipe = (i) => i.swipe === null && i.available > 0;
+  const deckItems = items.filter(toSwipe);
   const current = tab || (deckItems.length ? 'swipe' : 'choices');
   const tabs = h(
     'div',
@@ -550,7 +552,7 @@ async function viewCollection(id, tab) {
     h(
       'button',
       { class: current === 'choices' ? 'active' : '', onclick: () => viewCollection(id, 'choices') },
-      `My choices (${items.length - deckItems.length})`
+      `My choices (${items.filter((i) => i.swipe !== null).length})`
     )
   );
 
@@ -563,7 +565,7 @@ async function viewCollection(id, tab) {
 }
 
 function renderDeck(c, items) {
-  const queue = items.filter((i) => i.swipe === null);
+  const queue = items.filter((i) => i.swipe === null && i.available > 0);
   const history = [];
   const wrap = h('div', { class: 'deck-wrap' });
   const deck = h('div', { class: 'deck' });
@@ -762,9 +764,10 @@ function renderChoices(c, items) {
         'div',
         { class: 'grow' },
         h('div', { class: 'name' }, item.title),
-        item.quantity > 1 && h('div', { class: 'muted small' }, `${item.quantity} available`)
+        item.available > 0 && item.quantity > 1 && h('div', { class: 'muted small' }, `${item.available} available`),
+        item.available === 0 && h('div', { class: 'muted small' }, item.won ? '✓ Yours, already picked up' : 'Already picked up by someone')
       ),
-      h(
+      item.available > 0 && h(
         'div',
         { class: 'choice-toggle' },
         h('button', { class: item.swipe === 'pass' ? 'on pass' : '', onclick: toggle(false), 'aria-pressed': String(item.swipe === 'pass') }, '✕ Pass'),
@@ -1269,6 +1272,33 @@ async function viewAdminCollection(id, tab) {
     reopen();
   });
 
+  // Admins and the collection's maker: open a closed collection again with a new deadline.
+  function openReopenSheet() {
+    const form = h(
+      'form',
+      {
+        class: 'stack',
+        onsubmit: action(async (e) => {
+          const expiresAt = new Date(formData(e.target).expiresAt).getTime();
+          if (!(expiresAt > Date.now())) throw new Error('Choose a new deadline in the future.');
+          await api('POST', `/api/admin/collections/${id}/reopen`, { expiresAt });
+          dlg.close();
+          toast('Reopened. Add new items; participants only need to swipe what they haven\'t seen yet.');
+          reopen('items');
+        }),
+      },
+      h('p', {}, 'Participants can swipe again: they only see items they haven\'t judged yet (like new ones you add), and can still change earlier choices.'),
+      h('ul', { class: 'small muted', style: { margin: 0, paddingLeft: '20px' } },
+        h('li', {}, 'The current allocation is set aside and saved as a version.'),
+        h('li', {}, 'Items already picked up stay with their person.'),
+        h('li', {}, 'At the new deadline everything else is handed out again.')
+      ),
+      h('label', {}, 'New deadline', deadlinePicker(deadlineIn(3))),
+      h('button', { class: 'primary block big-btn', type: 'submit' }, 'Reopen')
+    );
+    const dlg = openSheet('Reopen collection', form);
+  }
+
   const closeNow = action(async () => {
     if (!(await confirmDialog('Swiping stops and the items are handed out straight away.', { title: 'Close this collection now?', confirmLabel: 'Close now' }))) return;
     await api('POST', `/api/admin/collections/${id}/close`);
@@ -1280,7 +1310,8 @@ async function viewAdminCollection(id, tab) {
     { class: 'card status-card' },
     h('div', { class: 'grow' }, h('div', { class: 'row' }, countdown(c, { reload: true })), counts),
     c.state === 'draft' && h('button', { class: 'primary', onclick: publish }, '🚀 Publish'),
-    c.state === 'open' && h('button', { onclick: closeNow }, '⏹ Close now')
+    c.state === 'open' && h('button', { onclick: closeNow }, '⏹ Close now'),
+    c.state === 'closed' && data.canReopen && h('button', { onclick: openReopenSheet }, '🔓 Reopen')
   );
 
   // --- items ---
@@ -1797,7 +1828,8 @@ async function viewAdminCollection(id, tab) {
           const f = formData(e.target);
           const expiresAt = new Date(f.expiresAt).getTime();
           if (c.state === 'closed' && expiresAt > Date.now()) {
-            if (!(await confirmDialog('The current results and pickup status will be discarded, and items are handed out again at the new deadline.', { title: 'Re-open this collection?', confirmLabel: 'Re-open', danger: true }))) return;
+            if (!data.canReopen) throw new Error('Only an admin or the person who made this collection can reopen it.');
+            if (!(await confirmDialog('The current allocation is set aside (saved as a version); items already picked up stay with their person. Everything else is handed out again at the new deadline.', { title: 'Reopen this collection?', confirmLabel: 'Reopen' }))) return;
           }
           await api('PATCH', `/api/admin/collections/${id}`, {
             name: f.name,

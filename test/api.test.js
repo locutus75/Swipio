@@ -114,11 +114,12 @@ test('full flow: setup, invite, swipe, expire, collect', async () => {
   r = await bob('GET', `/api/collections/${cid}`);
   assert.equal(r.data.items.find((i) => i.id === lamp.id).collected, true);
 
-  // Extending the deadline re-opens it and clears results
+  // Extending the deadline re-opens it: results are cleared, except what was already picked up
   await admin('PATCH', `/api/admin/collections/${cid}`, { expiresAt: srv.now() + HOUR });
   r = await bob('GET', `/api/collections/${cid}`);
   assert.equal(r.data.collection.state, 'open');
-  assert.equal(r.data.items.some((i) => i.won), false);
+  assert.deepEqual(r.data.items.filter((i) => i.won).map((i) => i.title), ['Lamp'], 'picked-up Lamp stays with Bob');
+  assert.equal(r.data.items.find((i) => i.title === 'Lamp').available, 0);
 
   // Close now finalizes immediately
   r = await admin('POST', `/api/admin/collections/${cid}/close`);

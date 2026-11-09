@@ -29,7 +29,10 @@ can pick up.
   them in one list. Items upload in the background while you carry on, and photos are shrunk in
   the browser first, so even big phone photos upload quickly. Items can also have a description,
   a quantity, or an image link instead of a photo
-- Close a collection early, or move the deadline later to re-open it
+- Close a collection early. **Reopen** a closed one with a new deadline (admins and the collection's
+  maker only) to add items: participants then only swipe what they haven't judged yet and can still
+  change earlier choices. The allocation is saved as a version and set aside, except items already
+  picked up, which stay with their person; everything else is handed out again at the new deadline
 
 **Managing people and results** (Manager and Admin)
 - Invite people by name and email. You get an invite link to copy, email or share; the

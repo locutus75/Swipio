@@ -73,11 +73,17 @@ export function createApi({ now = Date.now } = {}) {
     const c = await first(db, 'SELECT * FROM collections WHERE id = ?', collectionId);
     if (!c || c.finalized_at !== null) return;
     const { items, likes } = await allocationInput(db, collectionId);
+    // After a reopen, items that were already picked up are still allocated: they stay put.
+    const fixed = await all(
+      db,
+      'SELECT a.item_id AS itemId, a.user_id AS userId FROM allocations a JOIN items i ON i.id = a.item_id WHERE i.collection_id = ?',
+      collectionId
+    );
     // D1 has no interactive transactions, but a batch is atomic. The result is deterministic
     // (seeded), so INSERT OR IGNORE makes a concurrent finalization of the same collection harmless.
     const insert = db.prepare('INSERT OR IGNORE INTO allocations (item_id, user_id) VALUES (?, ?)');
     await db.batch([
-      ...allocate({ items, likes, seed: seedFor(c) }).map((a) => insert.bind(a.itemId, a.userId)),
+      ...allocate({ items, likes, seed: seedFor(c), fixed }).map((a) => insert.bind(a.itemId, a.userId)),
       db.prepare('UPDATE collections SET finalized_at = ? WHERE id = ? AND finalized_at IS NULL').bind(now(), collectionId),
     ]);
   }
@@ -353,6 +359,24 @@ export function createApi({ now = Date.now } = {}) {
     return item;
   }
 
+  /** Reopening a closed collection is for admins and the person who made it. */
+  const canReopen = (user, c) => atLeast(user, 'admin') || c.created_by === user.id;
+
+  /**
+   * Statements that reopen a closed collection: the allocation is set aside (a version is saved
+   * first), except items already picked up, which stay with their person and count at the next close.
+   */
+  async function reopenStatements(ctx, c) {
+    if (!canReopen(ctx.user, c)) {
+      throw new HttpError(403, 'Only an admin or the person who made this collection can reopen it');
+    }
+    await saveVersion(ctx.db, c, 'Before reopening', ctx.user.id);
+    return [
+      ctx.db.prepare('DELETE FROM allocations WHERE collected_at IS NULL AND item_id IN (SELECT id FROM items WHERE collection_id = ?)').bind(c.id),
+      ctx.db.prepare('DELETE FROM allocation_exclusions WHERE item_id IN (SELECT id FROM items WHERE collection_id = ?)').bind(c.id),
+    ];
+  }
+
   function parseRole(value, fallback) {
     if (value === undefined || value === null || value === '') return fallback;
     if (value === 'user') return 'participant'; // older clients
@@ -518,7 +542,8 @@ export function createApi({ now = Date.now } = {}) {
     const c = await memberCollection(ctx, ctx.params.id);
     const items = await all(
       ctx.db,
-      `SELECT i.*, s.liked AS liked, a.id AS allocation_id, a.collected_at AS collected_at
+      `SELECT i.*, s.liked AS liked, a.id AS allocation_id, a.collected_at AS collected_at,
+              (SELECT COUNT(*) FROM allocations p WHERE p.item_id = i.id AND p.collected_at IS NOT NULL) AS picked_up
          FROM items i
          LEFT JOIN swipes s ON s.item_id = i.id AND s.user_id = ?1
          LEFT JOIN allocations a ON a.item_id = i.id AND a.user_id = ?1
@@ -534,6 +559,8 @@ export function createApi({ now = Date.now } = {}) {
         swipe: i.liked === null ? null : i.liked ? 'like' : 'pass',
         won: i.allocation_id !== null,
         collected: i.collected_at !== null,
+        // Units left to hand out; 0 means everything was already picked up (after a reopen).
+        available: Math.max(0, i.quantity - i.picked_up),
       })),
     };
   });
@@ -767,6 +794,7 @@ export function createApi({ now = Date.now } = {}) {
       createdBy: creator ? { id: creator.id, name: creator.name } : null,
       editors,
       allocationRound: c.allocation_round || 0,
+      canReopen: canReopen(ctx.user, c),
       removed: exclusions.map((x) => ({ userId: x.user_id, userName: x.user_name, itemId: x.item_id, itemTitle: x.item_title })),
       canDelete: seeChoices || c.created_by === ctx.user.id,
       canManageEditors: seeChoices,
@@ -799,10 +827,7 @@ export function createApi({ now = Date.now } = {}) {
     // Moving the deadline into the future re-opens a closed collection.
     let finalizedAt = c.finalized_at;
     if (finalizedAt !== null && expiresAt > now()) {
-      stmts.push(
-        db.prepare('DELETE FROM allocations WHERE item_id IN (SELECT id FROM items WHERE collection_id = ?)').bind(c.id),
-        db.prepare('DELETE FROM allocation_exclusions WHERE item_id IN (SELECT id FROM items WHERE collection_id = ?)').bind(c.id)
-      );
+      stmts.push(...(await reopenStatements(ctx, c)));
       finalizedAt = null;
     }
     stmts.push(
@@ -812,6 +837,19 @@ export function createApi({ now = Date.now } = {}) {
     );
     await db.batch(stmts);
     await finalizeDue(db);
+    return { collection: serializeCollection(await getCollection(db, c.id)) };
+  });
+
+  route('POST', '/api/admin/collections/:id/reopen', { role: 'creator' }, async (ctx) => {
+    const { db, body } = ctx;
+    const c = await managedCollection(ctx, ctx.params.id);
+    if (c.finalized_at === null) throw new HttpError(409, 'This collection is not closed');
+    const expiresAt = timestamp(body.expiresAt, 'expiresAt');
+    if (expiresAt === undefined || expiresAt <= now()) throw new HttpError(400, 'Choose a new deadline in the future');
+    await db.batch([
+      ...(await reopenStatements(ctx, c)),
+      db.prepare('UPDATE collections SET expires_at = ?, finalized_at = NULL, published = 1 WHERE id = ?').bind(expiresAt, c.id),
+    ]);
     return { collection: serializeCollection(await getCollection(db, c.id)) };
   });
 
