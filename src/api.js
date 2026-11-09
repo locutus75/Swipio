@@ -215,7 +215,61 @@ export function createApi({ now = Date.now } = {}) {
     for (const { id } of due) await finalizeCollection(db, id);
   }
 
-  const publicUser = (u) => ({ id: u.id, name: u.name, email: u.email, role: u.access_role });
+  const publicUser = (u) => ({ id: u.id, name: u.name, email: u.email, role: u.access_role, plan: u.plan || 'free' });
+
+  // ---------- plans & limits ----------
+
+  const DAY = 24 * 3600 * 1000;
+  const PLAN_LIMITS = [
+    ['maxPeople', 'max_people'],
+    ['maxItems', 'max_items'],
+    ['maxPhotoKb', 'max_photo_kb'],
+    ['maxSwipeDays', 'max_swipe_days'],
+    ['deleteAfterDays', 'delete_after_days'],
+  ];
+  const HARD_PHOTO_KB = MAX_IMAGE_BYTES / 1024;
+  const NO_LIMITS = Object.fromEntries(PLAN_LIMITS.map(([k]) => [k, null]));
+
+  const serializePlan = (p) => ({
+    id: p.id,
+    name: p.name,
+    ...Object.fromEntries(PLAN_LIMITS.map(([k, col]) => [k, p[col] ?? null])),
+  });
+
+  async function planOf(db, planId) {
+    return (
+      (await first(db, 'SELECT * FROM plans WHERE id = ?', planId || 'free')) ||
+      (await first(db, "SELECT * FROM plans WHERE id = 'free'"))
+    );
+  }
+
+  /** The limits for a person's collections: their plan's, or none for admins. */
+  async function limitsForUser(db, user) {
+    if (!user) return { plan: 'free', planName: 'Free', ...serializePlanLimits(await planOf(db, 'free')) };
+    if (user.access_role === 'admin') return { plan: 'admin', planName: 'Admin', ...NO_LIMITS };
+    const p = await planOf(db, user.plan);
+    return { plan: p.id, planName: p.name, ...serializePlanLimits(p) };
+  }
+  function serializePlanLimits(p) {
+    const { id, name, ...limits } = serializePlan(p);
+    return limits;
+  }
+
+  /** The limits that apply to a collection: those of the plan of whoever made it. */
+  async function limitsFor(db, c) {
+    const owner = c.created_by ? await first(db, 'SELECT * FROM users WHERE id = ?', c.created_by) : null;
+    return limitsForUser(db, owner);
+  }
+
+  const photoLimitBytes = (limits) => Math.min(MAX_IMAGE_BYTES, limits.maxPhotoKb == null ? Infinity : limits.maxPhotoKb * 1024);
+
+  /** Refuses a deadline further ahead than the plan allows (an hour of slack for rounding). */
+  function checkDeadline(limits, expiresAt) {
+    if (limits.maxSwipeDays == null) return;
+    if (expiresAt > now() + limits.maxSwipeDays * DAY + 3600_000) {
+      throw new HttpError(403, `On the ${limits.planName} plan the deadline can be at most ${limits.maxSwipeDays} days ahead`);
+    }
+  }
 
   // The frontend turns inviteToken into a link, since only it knows its own address.
   function adminUser(u) {
@@ -440,10 +494,10 @@ export function createApi({ now = Date.now } = {}) {
   }
 
   /** Stores an uploaded image and returns its id, or null when no file was sent. */
-  async function storeImage(db, file) {
+  async function storeImage(db, file, maxBytes = MAX_IMAGE_BYTES) {
     if (!file || typeof file === 'string' || !file.size) return null;
     if (!IMAGE_TYPES.includes(file.type)) throw new HttpError(400, 'Only JPEG, PNG, GIF, WebP or AVIF images are allowed');
-    if (file.size > MAX_IMAGE_BYTES) throw new HttpError(413, 'Image is too large (max 1.5 MB)');
+    if (file.size > maxBytes) throw new HttpError(413, `Image is too large (max ${Math.floor(maxBytes / 1024)} KB)`);
     const row = await first(
       db,
       'INSERT INTO images (content_type, data, created_at) VALUES (?, ?, ?) RETURNING id',
@@ -665,6 +719,36 @@ export function createApi({ now = Date.now } = {}) {
     return { ok: true };
   });
 
+  // ---------- plans ----------
+
+  // Everyone signed in can see the plans (and so their own limits); only admins change them.
+  route('GET', '/api/plans', { auth: true }, async ({ db, user }) => ({
+    plans: (await all(db, 'SELECT * FROM plans ORDER BY position')).map(serializePlan),
+    myLimits: await limitsForUser(db, user),
+  }));
+
+  route('PUT', '/api/admin/plans/:id', { role: 'admin' }, async ({ db, params, body }) => {
+    const plan = await first(db, 'SELECT * FROM plans WHERE id = ?', params.id);
+    if (!plan) throw new HttpError(404, 'Plan not found');
+    const name = str(body.name, 'name', { max: 40 }) || plan.name;
+    const values = PLAN_LIMITS.map(([key, col]) => {
+      if (body[key] === undefined) return plan[col];
+      if (body[key] === null || body[key] === '') return null; // no limit
+      const n = Number(body[key]);
+      if (!Number.isInteger(n) || n < 1 || n > 1_000_000) throw new HttpError(400, `${key} must be a whole number of at least 1, or empty for no limit`);
+      if (key === 'maxPhotoKb' && n > HARD_PHOTO_KB) throw new HttpError(400, `Photos can be at most ${HARD_PHOTO_KB} KB`);
+      return n;
+    });
+    const updated = await first(
+      db,
+      `UPDATE plans SET name = ?, ${PLAN_LIMITS.map(([, col]) => `${col} = ?`).join(', ')} WHERE id = ? RETURNING *`,
+      name,
+      ...values,
+      plan.id
+    );
+    return { plan: serializePlan(updated) };
+  });
+
   // ---------- admin: users ----------
 
   /** A user as seen by the current user: invite links only for admins and whoever sent the invite. */
@@ -689,7 +773,26 @@ export function createApi({ now = Date.now } = {}) {
     const role = isAdmin(ctx.user) ? parseRole(body.role, 'creator') : 'creator';
     const collectionIds = Array.isArray(body.collectionIds) ? [...new Set(body.collectionIds.map(Number))] : [];
     if (!isAdmin(ctx.user) && !collectionIds.length) throw new HttpError(400, 'Invite people from one of your collections');
-    for (const cid of collectionIds) await managedCollection(ctx, cid);
+    const collections = [];
+    for (const cid of collectionIds) collections.push(await managedCollection(ctx, cid));
+    const existingUser = await first(db, 'SELECT id FROM users WHERE email = ?', email);
+    if (role !== 'admin') {
+      // Each collection's plan caps how many people can be on its People list.
+      for (const c of collections) {
+        const limits = await limitsFor(db, c);
+        if (limits.maxPeople == null) continue;
+        if (existingUser && (await first(db, 'SELECT 1 AS ok FROM collection_people WHERE collection_id = ? AND user_id = ?', c.id, existingUser.id))) continue;
+        const { n } = await first(
+          db,
+          'SELECT COUNT(*) AS n FROM collection_people WHERE collection_id = ? AND user_id IS NOT ?',
+          c.id,
+          c.created_by
+        );
+        if (n >= limits.maxPeople) {
+          throw new HttpError(403, `"${c.name}" is full: at most ${limits.maxPeople} people on the ${limits.planName} plan`);
+        }
+      }
+    }
     const addMember = db.prepare('INSERT OR IGNORE INTO collection_members (collection_id, user_id) VALUES (?, ?)');
     const addPerson = db.prepare('INSERT OR IGNORE INTO collection_people (collection_id, user_id) VALUES (?, ?)');
     const add = (cid, uid) => [addMember.bind(cid, uid), addPerson.bind(cid, uid)];
@@ -728,7 +831,13 @@ export function createApi({ now = Date.now } = {}) {
       throw new HttpError(400, 'You cannot change your own role or block yourself');
     }
     const blockedAt = blocked ? user.blocked_at || now() : null;
+    let plan = user.plan || 'free';
+    if (ctx.body.plan !== undefined) {
+      if (!(await first(ctx.db, 'SELECT 1 AS ok FROM plans WHERE id = ?', String(ctx.body.plan)))) throw new HttpError(400, 'Unknown plan');
+      plan = String(ctx.body.plan);
+    }
     const stmts = [
+      ctx.db.prepare('UPDATE users SET plan = ? WHERE id = ?').bind(plan, user.id),
       ctx.db
         .prepare('UPDATE users SET name = ?, role = ?, access_role = ?, blocked_at = ? WHERE id = ?')
         .bind(name, role === 'admin' ? 'admin' : 'user', role, blockedAt, user.id),
@@ -741,7 +850,7 @@ export function createApi({ now = Date.now } = {}) {
       stmts.push(ctx.db.prepare('DELETE FROM collection_people WHERE user_id = ?').bind(user.id));
     }
     await ctx.db.batch(stmts);
-    return { user: adminUser({ ...user, name, access_role: role, blocked_at: blockedAt }) };
+    return { user: adminUser({ ...user, name, access_role: role, blocked_at: blockedAt, plan }) };
   });
 
   route('POST', '/api/admin/users/:id/invite', { role: 'admin' }, async (ctx) => {
@@ -801,6 +910,7 @@ export function createApi({ now = Date.now } = {}) {
     const description = str(body.description, 'description') || '';
     const expiresAt = timestamp(body.expiresAt, 'expiresAt');
     if (expiresAt === undefined) throw new HttpError(400, 'expiresAt is required');
+    checkDeadline(await limitsForUser(db, user), expiresAt);
     const c = await first(
       db,
       'INSERT INTO collections (name, description, expires_at, published, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?) RETURNING *',
@@ -820,6 +930,7 @@ export function createApi({ now = Date.now } = {}) {
     const c = await managedCollection(ctx, ctx.params.id);
     const seeChoices = true; // owners and co-managers see who chose what
     const ownerRights = ctx.access !== 'editor';
+    const limits = await limitsFor(db, c);
     const people = await all(
       db,
       `SELECT u.* FROM collection_people p JOIN users u ON u.id = p.user_id
@@ -900,6 +1011,8 @@ export function createApi({ now = Date.now } = {}) {
         canLike: !editors.some((e) => e.id === u.id && e.can_like === 0),
       })),
       people: people.map((u) => userFor(ctx, u)),
+      limits,
+      deletesAt: c.finalized_at !== null && limits.deleteAfterDays != null ? c.finalized_at + limits.deleteAfterDays * DAY : null,
       choices: swipes.map((s) => ({ userId: s.user_id, itemId: s.item_id, liked: !!s.liked })),
       allocations: (seeChoices ? allocations : []).map((a) => ({
         id: a.id,
@@ -919,6 +1032,7 @@ export function createApi({ now = Date.now } = {}) {
     const name = str(body.name, 'name', { max: 120 }) || c.name;
     const description = str(body.description, 'description') ?? c.description;
     const expiresAt = timestamp(body.expiresAt, 'expiresAt') ?? c.expires_at;
+    if (expiresAt !== c.expires_at) checkDeadline(await limitsFor(db, c), expiresAt);
     const published = body.published === undefined ? c.published : body.published ? 1 : 0;
     const stmts = [];
     // Moving the deadline into the future re-opens a closed collection.
@@ -943,6 +1057,7 @@ export function createApi({ now = Date.now } = {}) {
     if (c.finalized_at === null) throw new HttpError(409, 'This collection is not closed');
     const expiresAt = timestamp(body.expiresAt, 'expiresAt');
     if (expiresAt === undefined || expiresAt <= now()) throw new HttpError(400, 'Choose a new deadline in the future');
+    checkDeadline(await limitsFor(db, c), expiresAt);
     await db.batch([
       ...(await reopenStatements(ctx, c)),
       db.prepare('UPDATE collections SET expires_at = ?, finalized_at = NULL, published = 1 WHERE id = ?').bind(expiresAt, c.id),
@@ -1233,7 +1348,14 @@ export function createApi({ now = Date.now } = {}) {
     const qty = quantity(body.quantity) ?? 1;
     const group = str(body.group, 'group', { max: 60 }) || null;
     const url = imageUrl(body.imageUrl);
-    const imageId = await storeImage(db, body.image);
+    const limits = await limitsFor(db, c);
+    if (limits.maxItems != null) {
+      const { n } = await first(db, 'SELECT COUNT(*) AS n FROM items WHERE collection_id = ?', c.id);
+      if (n >= limits.maxItems) {
+        throw new HttpError(403, `This collection is full: at most ${limits.maxItems} items on the ${limits.planName} plan`);
+      }
+    }
+    const imageId = await storeImage(db, body.image, photoLimitBytes(limits));
     const item = await first(
       db,
       `INSERT INTO items (collection_id, title, description, image_id, image_url, quantity, product_group, created_at)
@@ -1261,7 +1383,7 @@ export function createApi({ now = Date.now } = {}) {
     const url = body.imageUrl ? imageUrl(body.imageUrl) : undefined;
     let imageId = item.image_id;
     let imgUrl = item.image_url;
-    const uploaded = await storeImage(db, body.image);
+    const uploaded = await storeImage(db, body.image, photoLimitBytes(await limitsFor(db, await getCollection(db, item.collection_id))));
     if (uploaded) [imageId, imgUrl] = [uploaded, null];
     else if (body.removeImage === 'true' || body.removeImage === true) [imageId, imgUrl] = [null, null];
     else if (url) [imageId, imgUrl] = [null, url];
@@ -1376,9 +1498,33 @@ export function createApi({ now = Date.now } = {}) {
     }
   }
 
-  async function scheduled(event, env) {
-    await finalizeDue(env.DB);
+  /** Deletes closed collections whose plan says they should be removed by now. */
+  async function deleteExpired(db) {
+    const due = await all(
+      db,
+      `SELECT c.id FROM collections c
+         LEFT JOIN users u ON u.id = c.created_by
+         JOIN plans p ON p.id = COALESCE(u.plan, 'free')
+        WHERE c.finalized_at IS NOT NULL
+          AND COALESCE(u.access_role, 'creator') != 'admin'
+          AND p.delete_after_days IS NOT NULL
+          AND c.finalized_at + p.delete_after_days * ? <= ?`,
+      DAY,
+      now()
+    );
+    for (const { id } of due) {
+      await db.batch([
+        db.prepare('DELETE FROM images WHERE id IN (SELECT image_id FROM items WHERE collection_id = ? AND image_id IS NOT NULL)').bind(id),
+        db.prepare('DELETE FROM collections WHERE id = ?').bind(id),
+      ]);
+    }
+    return due.length;
   }
 
-  return { fetch, scheduled, finalizeDue };
+  async function scheduled(event, env) {
+    await finalizeDue(env.DB);
+    await deleteExpired(env.DB);
+  }
+
+  return { fetch, scheduled, finalizeDue, deleteExpired };
 }

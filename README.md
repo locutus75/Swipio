@@ -35,6 +35,16 @@ can pick up.
 - New sign-ups are capped at `SIGNUPS_PER_HOUR` (30) per hour. An optional bot check
   (Cloudflare Turnstile) can be switched on; see [Bot check on sign-up](#bot-check-on-sign-up-optional)
 
+**Plans and limits** (set by admins under *Manage → Plans*)
+- Four plans: **Free** (everyone starts here), **Plus**, **Max** and **Ultra**. Admins pick someone's
+  plan under *Manage → People*. Paying for a plan isn't built yet
+- Per plan: items per collection, people per collection (not counting its maker), photo size (KB, at
+  most 1536), how far ahead the deadline may be set, and after how many days a closed collection is
+  deleted (with its items, photos and results). Empty means no limit; all plans start without limits
+- The limits follow the plan of whoever made the collection; collections made by admins have none
+- A collection already over a limit keeps everything, but nothing more can be added. The collection's
+  Settings show its limits, and a closed collection shows when it will be deleted
+
 **Creating collections**
 - Create collections with a name, description and closing time (quick picks: 1 day, 3 days, 1 week, 2 weeks); keep them as drafts until you tap **Publish**
 - Built for adding items from a phone: tap **Take photo**, type a name, tap **Save & next photo**

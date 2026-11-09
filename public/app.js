@@ -211,20 +211,37 @@ function thumb(item, cls = 'thumb', fallbackCls = cls) {
   return img;
 }
 
-/** Shrinks a photo to at most 1200px and re-encodes it as JPEG, so uploads stay small. */
-async function resizeImage(file, max = 1200) {
-  if (file.type === 'image/gif') return file; // keep animations
+const MAX_PHOTO_BYTES = 1.5 * 1024 * 1024;
+/** Per collection: the largest photo its plan accepts (filled in when a collection is opened). */
+const photoLimits = new Map();
+const photoLimitFor = (collectionId) => photoLimits.get(Number(collectionId)) || MAX_PHOTO_BYTES;
+
+/**
+ * Shrinks a photo to at most 1200px and re-encodes it as JPEG, so uploads stay small. If it is
+ * still bigger than `maxBytes` (the plan's photo limit), it tries smaller and lower-quality versions.
+ */
+async function resizeImage(file, maxBytes = MAX_PHOTO_BYTES) {
+  if (file.type === 'image/gif') {
+    if (file.size > maxBytes) throw new Error(`This GIF is too large (max ${Math.floor(maxBytes / 1024)} KB).`);
+    return file; // keep animations
+  }
   const image = await loadImage(file);
   const w = image.naturalWidth || image.width;
   const hgt = image.naturalHeight || image.height;
-  const scale = Math.min(1, max / Math.max(w, hgt));
-  const canvas = document.createElement('canvas');
-  canvas.width = Math.round(w * scale);
-  canvas.height = Math.round(hgt * scale);
-  canvas.getContext('2d').drawImage(image, 0, 0, canvas.width, canvas.height);
+  let blob = null;
+  for (const [max, quality] of [[1200, 0.82], [1200, 0.7], [1000, 0.65], [800, 0.6], [640, 0.55], [480, 0.5], [360, 0.45]]) {
+    const scale = Math.min(1, max / Math.max(w, hgt));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(w * scale);
+    canvas.height = Math.round(hgt * scale);
+    canvas.getContext('2d').drawImage(image, 0, 0, canvas.width, canvas.height);
+    blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', quality));
+    if (!blob) break;
+    if (blob.size <= maxBytes) break;
+  }
   image.close?.();
-  const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.82));
   if (!blob) throw new Error('That photo could not be processed.');
+  if (blob.size > maxBytes) throw new Error(`This photo can't be made small enough (max ${Math.floor(maxBytes / 1024)} KB).`);
   return blob;
 }
 
@@ -336,6 +353,7 @@ const routes = [
   [/^#\/c\/(\d+)$/, viewCollection],
   [/^#\/admin$/, viewAdmin],
   [/^#\/admin\/users$/, viewAdminUsers, { role: 'admin' }],
+  [/^#\/admin\/plans$/, viewAdminPlans, { role: 'admin' }],
   [/^#\/admin\/c\/(\d+)(?:\/(items|people|results|settings))?$/, viewAdminCollection],
   [/^#?\/?$/, viewHome],
 ];
@@ -914,7 +932,8 @@ function adminTabs(current) {
     'div',
     { class: 'tabs' },
     h('button', { class: current === 'collections' ? 'active' : '', onclick: () => go('#/admin') }, 'Collections'),
-    can('admin') && h('button', { class: current === 'users' ? 'active' : '', onclick: () => go('#/admin/users') }, 'People')
+    can('admin') && h('button', { class: current === 'users' ? 'active' : '', onclick: () => go('#/admin/users') }, 'People'),
+    can('admin') && h('button', { class: current === 'plans' ? 'active' : '', onclick: () => go('#/admin/plans') }, 'Plans')
   );
 }
 
@@ -1019,6 +1038,7 @@ function openUserSheet(u, onChange) {
           onChange();
         }),
       })),
+    manageable && u.role !== 'admin' && planSelect(u, onChange),
     u.status === 'invited' && u.inviteToken && h('button', { onclick: () => inviteDialog(u) }, '✉️ Show invite link'),
     manageable &&
       u.status === 'active' &&
@@ -1056,6 +1076,24 @@ function openUserSheet(u, onChange) {
   const dlg = openSheet('Person', body);
 }
 
+let plansCache = null;
+/** Picks a person's plan (their collections' limits). */
+function planSelect(u, onChange) {
+  const select = h('select', {
+    name: 'plan',
+    onchange: action(async (e) => {
+      await api('PATCH', `/api/admin/users/${u.id}`, { plan: e.target.value });
+      u.plan = e.target.value;
+      toast(`${u.name} is now on ${select.selectedOptions[0].textContent}`);
+      onChange();
+    }),
+  });
+  const fill = (plans) => select.replaceChildren(...plans.map((p) => h('option', { value: p.id, selected: p.id === (u.plan || 'free') }, p.name)));
+  fill([{ id: u.plan || 'free', name: u.plan || 'free' }]);
+  (plansCache ||= api('GET', '/api/plans').then((r) => r.plans)).then(fill).catch(() => {});
+  return h('label', {}, 'Plan', select);
+}
+
 async function viewAdminUsers() {
   const { users } = await api('GET', '/api/admin/users');
   const row = (u) =>
@@ -1063,7 +1101,7 @@ async function viewAdminUsers() {
       'button',
       { class: 'item-row item-button', onclick: () => openUserSheet(u, () => render()) },
       h('div', { class: 'thumb' }, u.name.charAt(0).toUpperCase()),
-      h('div', { class: 'grow' }, h('div', { class: 'name' }, u.name, ' ', roleBadge(u.role)), h('div', { class: 'muted small' }, u.email)),
+      h('div', { class: 'grow' }, h('div', { class: 'name' }, u.name, ' ', roleBadge(u.role), u.role !== 'admin' && u.plan && u.plan !== 'free' && h('span', { class: 'badge role-creator' }, u.plan.charAt(0).toUpperCase() + u.plan.slice(1))), h('div', { class: 'muted small' }, u.email)),
       u.blocked ? h('span', { class: 'badge danger' }, 'Blocked') : u.status === 'invited' && h('span', { class: 'badge' }, 'Invited'),
       h('span', { class: 'chev', 'aria-hidden': 'true' }, '›')
     );
@@ -1074,6 +1112,60 @@ async function viewAdminUsers() {
     adminTabs('users'),
     inviteForm({ onCreated: () => render() }),
     h('div', { class: 'section card' }, users.map(row))
+  );
+}
+
+const PLAN_FIELDS = [
+  ['maxItems', 'Items per collection', ''],
+  ['maxPeople', 'People per collection', 'not counting its maker'],
+  ['maxPhotoKb', 'Photo size (KB)', 'at most 1536'],
+  ['maxSwipeDays', 'Deadline up to (days ahead)', ''],
+  ['deleteAfterDays', 'Delete closed collections after (days)', 'with all items, photos and results'],
+];
+
+async function viewAdminPlans() {
+  const { plans } = await api('GET', '/api/plans');
+  const card = (p) =>
+    h(
+      'form',
+      {
+        class: 'card stack',
+        onsubmit: action(async (e) => {
+          const f = formData(e.target);
+          const body = { name: f.name };
+          for (const [key] of PLAN_FIELDS) body[key] = f[key] === '' ? null : Number(f[key]);
+          if (body.deleteAfterDays != null && p.deleteAfterDays !== body.deleteAfterDays) {
+            const ok = await confirmDialog(
+              `Collections on this plan that closed more than ${plural(body.deleteAfterDays, 'day')} ago are deleted within a minute, with all their items, photos and results. This can't be undone.`,
+              { title: 'Delete old collections automatically?', confirmLabel: 'Save', danger: true }
+            );
+            if (!ok) return;
+          }
+          await api('PUT', `/api/admin/plans/${p.id}`, body);
+          plansCache = null;
+          toast(`${f.name} saved`);
+        }),
+      },
+      h('div', { class: 'row spread' }, h('h3', { style: { margin: 0 } }, p.name), p.id === 'free' && h('span', { class: 'badge' }, 'Everyone starts here')),
+      h('label', {}, 'Name', h('input', { name: 'name', value: p.name, maxlength: 40, required: true })),
+      h(
+        'div',
+        { class: 'grid-2' },
+        PLAN_FIELDS.map(([key, label, hint]) =>
+          h('label', {}, label,
+            h('input', { name: key, type: 'number', min: 1, max: key === 'maxPhotoKb' ? 1536 : undefined, step: 1, inputmode: 'numeric', placeholder: 'No limit', value: p[key] ?? '' }),
+            hint && h('div', { class: 'muted small', style: { fontWeight: 'normal' } }, hint)
+          )
+        )
+      ),
+      h('button', { class: 'primary', type: 'submit' }, 'Save')
+    );
+  mount(
+    topbar(h('a', { class: 'btn', href: '#/' }, '🃏 Swipe'), ...userMenu().slice(1)),
+    h('h1', {}, 'Manage'),
+    adminTabs('plans'),
+    h('p', { class: 'muted' }, 'Limits for collections made by users on each plan (admins have none). Leave a field empty for no limit. Existing collections over a limit keep everything, but nothing more can be added. Choose someone\'s plan under People.'),
+    h('div', { class: 'stack' }, plans.map(card))
   );
 }
 
@@ -1117,9 +1209,11 @@ function deadlineIn(days) {
 }
 
 /** Quick-pick buttons (1 day, 3 days, …) plus a date field that shows and fine-tunes the choice. */
-function deadlinePicker(initial) {
+/** Deadline input with quick picks; `maxDays` (the plan's limit) hides picks that go further. */
+function deadlinePicker(initial, maxDays = null) {
   const input = h('input', { name: 'expiresAt', type: 'datetime-local', required: true, value: toLocalInput(initial) });
-  const options = [['1 day', 1], ['3 days', 3], ['1 week', 7], ['2 weeks', 14]];
+  if (maxDays != null) input.max = toLocalInput(deadlineIn(maxDays));
+  const options = [['1 day', 1], ['3 days', 3], ['1 week', 7], ['2 weeks', 14]].filter(([, d]) => maxDays == null || d <= maxDays);
   const chips = options.map(([label, days]) =>
     h('button', {
       type: 'button',
@@ -1132,10 +1226,18 @@ function deadlinePicker(initial) {
   );
   const chipFor = (days) => chips[options.findIndex(([, d]) => d === days)];
   input.addEventListener('input', () => chips.forEach((c) => c.classList.remove('on')));
-  return h('div', { class: 'stack' }, h('div', { class: 'chips' }, chips), input);
+  return h(
+    'div',
+    { class: 'stack' },
+    h('div', { class: 'chips' }, chips),
+    input,
+    maxDays != null && h('div', { class: 'muted small', style: { fontWeight: 'normal' } }, `Your plan allows a deadline up to ${plural(maxDays, 'day')} ahead.`)
+  );
 }
 
-function openNewCollectionSheet() {
+async function openNewCollectionSheet() {
+  const myLimits = await api('GET', '/api/plans').then((r) => r.myLimits).catch(() => null);
+  const maxDays = myLimits?.maxSwipeDays ?? null;
   const name = h('input', { name: 'name', required: true, maxlength: 120, placeholder: 'e.g. Office move giveaway', autocapitalize: 'sentences' });
   const form = h(
     'form',
@@ -1153,7 +1255,7 @@ function openNewCollectionSheet() {
       }),
     },
     h('label', {}, 'Name', name),
-    h('label', {}, 'Swiping closes', deadlinePicker(deadlineIn(7))),
+    h('label', {}, 'Swiping closes', deadlinePicker(deadlineIn(Math.min(7, maxDays ?? 7)), maxDays)),
     h('label', {}, 'Description', h('textarea', { name: 'description', rows: 2, placeholder: 'Pickup location, rules… (optional)' })),
     h('button', { class: 'primary block big-btn', type: 'submit' }, 'Create & add items')
   );
@@ -1265,7 +1367,7 @@ function runUpload(entry) {
       fd.set('quantity', String(entry.quantity));
       fd.set('description', entry.description);
       if (entry.group) fd.set('group', entry.group);
-      if (entry.file) fd.set('image', await resizeImage(entry.file), 'photo.jpg');
+      if (entry.file) fd.set('image', await resizeImage(entry.file, photoLimitFor(entry.collectionId)), 'photo.jpg');
       await api('POST', `/api/admin/collections/${entry.collectionId}/items`, fd);
       uploads.entries = uploads.entries.filter((e) => e !== entry);
       if (entry.preview) URL.revokeObjectURL(entry.preview);
@@ -1319,6 +1421,7 @@ window.addEventListener('beforeunload', (e) => {
 
 async function viewAdminCollection(id, tab) {
   const data = await api('GET', `/api/admin/collections/${id}`);
+  photoLimits.set(Number(id), data.limits.maxPhotoKb != null ? Math.min(MAX_PHOTO_BYTES, data.limits.maxPhotoKb * 1024) : MAX_PHOTO_BYTES);
   // Only people invited to this collection (admins never take part, so they aren't listed).
   const users = [...data.people, ...data.members.filter((m) => !data.people.some((p) => p.id === m.id))];
   const c = data.collection;
@@ -1377,7 +1480,7 @@ async function viewAdminCollection(id, tab) {
         h('li', {}, 'Items already picked up stay with their person.'),
         h('li', {}, 'At the new deadline everything else is handed out again.')
       ),
-      h('label', {}, 'New deadline', deadlinePicker(deadlineIn(3))),
+      h('label', {}, 'New deadline', deadlinePicker(deadlineIn(Math.min(3, data.limits.maxSwipeDays ?? 3)), data.limits.maxSwipeDays)),
       h('button', { class: 'primary block big-btn', type: 'submit' }, 'Reopen')
     );
     const dlg = openSheet('Reopen collection', form);
@@ -1392,7 +1495,11 @@ async function viewAdminCollection(id, tab) {
   const statusCard = h(
     'div',
     { class: 'card status-card' },
-    h('div', { class: 'grow' }, h('div', { class: 'row' }, countdown(c, { reload: true })), counts),
+    h('div', { class: 'grow' },
+      h('div', { class: 'row' }, countdown(c, { reload: true })),
+      counts,
+      data.deletesAt && h('div', { class: 'small', style: { color: 'var(--nope)', marginTop: '4px' } }, `🗑 Will be deleted ${formatDate(data.deletesAt)} (${data.limits.planName} plan)`)
+    ),
     c.state === 'draft' && h('button', { class: 'primary', onclick: publish }, '🚀 Publish'),
     c.state === 'open' && h('button', { onclick: closeNow }, '⏹ Close now'),
     c.state === 'closed' && data.canReopen && h('button', { onclick: openReopenSheet }, '🔓 Reopen')
@@ -1584,7 +1691,7 @@ async function viewAdminCollection(id, tab) {
       fd.set('quantity', qty.querySelector('input').value);
       fd.set('description', desc.value);
       fd.set('group', group.value.trim());
-      if (photo) fd.set('image', await resizeImage(photo), 'photo.jpg');
+      if (photo) fd.set('image', await resizeImage(photo, photoLimitFor(id)), 'photo.jpg');
       else if (removeImage) fd.set('removeImage', 'true');
       else if (imageUrl.value && imageUrl.value !== item.image) fd.set('imageUrl', imageUrl.value);
       await api('PATCH', `/api/admin/items/${item.id}`, fd);
@@ -1721,7 +1828,10 @@ async function viewAdminCollection(id, tab) {
       else if (files.length) openBulkSheet(files);
     });
 
-  const actionBar = h(
+  const itemsFull = data.limits.maxItems != null && data.items.length >= data.limits.maxItems;
+  const actionBar = itemsFull
+    ? h('div', { class: 'action-bar' }, h('p', { class: 'small', style: { margin: 0 } }, `This collection is full: ${data.limits.maxItems} items is the maximum on the ${data.limits.planName} plan.`))
+    : h(
     'div',
     { class: 'action-bar' },
     h('button', { class: 'primary', onclick: takePhoto }, '📷 Take photo'),
@@ -1938,7 +2048,25 @@ async function viewAdminCollection(id, tab) {
     );
   };
 
-  const renderSettings = () => h('div', { class: 'stack' }, renderDetails(), renderEditors());
+  const renderLimits = () => {
+    const L = data.limits;
+    if (L.plan === 'admin') return null;
+    const row = (label, value) => h('div', { class: 'row spread small' }, h('span', { class: 'muted' }, label), h('strong', {}, value));
+    const people = data.people.filter((p) => p.id !== data.createdBy?.id).length;
+    return h(
+      'div',
+      { class: 'card stack' },
+      h('h3', {}, `Limits · ${L.planName} plan`),
+      row('Items', L.maxItems != null ? `${data.items.length} / ${L.maxItems}` : `${data.items.length} · no limit`),
+      row('People', L.maxPeople != null ? `${people} / ${L.maxPeople}` : `${people} · no limit`),
+      row('Photo size', L.maxPhotoKb != null ? `max ${L.maxPhotoKb} KB` : 'max 1.5 MB'),
+      row('Deadline', L.maxSwipeDays != null ? `up to ${plural(L.maxSwipeDays, 'day')} ahead` : 'no limit'),
+      row('After closing', L.deleteAfterDays != null ? `deleted after ${plural(L.deleteAfterDays, 'day')}` : 'kept'),
+      h('p', { class: 'muted small', style: { margin: 0 } }, 'These follow the plan of the person who made this collection.')
+    );
+  };
+
+  const renderSettings = () => h('div', { class: 'stack' }, renderDetails(), renderEditors(), renderLimits());
 
   const renderDetails = () =>
     h(
@@ -1963,7 +2091,7 @@ async function viewAdminCollection(id, tab) {
         }),
       },
       h('label', {}, 'Name', h('input', { name: 'name', required: true, value: c.name })),
-      h('label', {}, 'Swiping closes', deadlinePicker(c.expiresAt)),
+      h('label', {}, 'Swiping closes', deadlinePicker(c.expiresAt, data.limits.maxSwipeDays)),
       h('label', {}, 'Description', h('textarea', { name: 'description', rows: 3 }, c.description)),
       h('label', { class: 'check' }, h('input', { type: 'checkbox', name: 'published', checked: c.published }), 'Published: invited people can see and swipe this collection'),
       h('div', { class: 'row spread' },
