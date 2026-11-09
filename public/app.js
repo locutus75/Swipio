@@ -1306,7 +1306,9 @@ window.addEventListener('beforeunload', (e) => {
 // ---------------------------------------------------------------------------
 
 async function viewAdminCollection(id, tab) {
-  const [data, { users }] = await Promise.all([api('GET', `/api/admin/collections/${id}`), api('GET', '/api/admin/users')]);
+  const [data, { users: allUsers }] = await Promise.all([api('GET', `/api/admin/collections/${id}`), api('GET', '/api/admin/users')]);
+  // Admins run the platform and never take part in collections, so they can't be ticked here.
+  const users = allUsers.filter((u) => u.role !== 'admin');
   const c = data.collection;
   const canAddItems = c.state !== 'closed';
   const tabs = [

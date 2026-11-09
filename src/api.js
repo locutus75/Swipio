@@ -695,6 +695,7 @@ export function createApi({ now = Date.now } = {}) {
     const existing = await first(db, 'SELECT * FROM users WHERE email = ?', email);
     if (existing) {
       if (!collectionIds.length) throw new HttpError(409, 'A user with this email already exists');
+      if (existing.access_role === 'admin') throw new HttpError(400, `${existing.name} is an admin. Admins manage the platform and don't take part in collections.`);
       await db.batch(collectionIds.map((cid) => add.bind(cid, existing.id)));
       return [200, { user: userFor(ctx, existing), existing: true }];
     }
@@ -711,7 +712,7 @@ export function createApi({ now = Date.now } = {}) {
       ctx.user.id,
       now()
     );
-    if (collectionIds.length) await db.batch(collectionIds.map((cid) => add.bind(cid, user.id)));
+    if (collectionIds.length && role !== 'admin') await db.batch(collectionIds.map((cid) => add.bind(cid, user.id)));
     return [201, { user: userFor(ctx, user), existing: false }];
   });
 
@@ -731,6 +732,11 @@ export function createApi({ now = Date.now } = {}) {
         .bind(name, role === 'admin' ? 'admin' : 'user', role, blockedAt, user.id),
     ];
     if (blocked) stmts.push(ctx.db.prepare('DELETE FROM sessions WHERE user_id = ?').bind(user.id)); // sign out everywhere
+    if (role === 'admin' && user.access_role !== 'admin') {
+      // Admins don't take part in collections (they can manage all of them anyway).
+      stmts.push(ctx.db.prepare('DELETE FROM collection_members WHERE user_id = ?').bind(user.id));
+      stmts.push(ctx.db.prepare('DELETE FROM collection_editors WHERE user_id = ?').bind(user.id));
+    }
     await ctx.db.batch(stmts);
     return { user: adminUser({ ...user, name, access_role: role, blocked_at: blockedAt }) };
   });
@@ -1148,7 +1154,9 @@ export function createApi({ now = Date.now } = {}) {
     if (!Array.isArray(body.userIds)) throw new HttpError(400, 'userIds must be an array');
     const ids = [...new Set(body.userIds.map(Number))];
     for (const id of ids) {
-      if (!(await first(db, 'SELECT 1 AS ok FROM users WHERE id = ?', id))) throw new HttpError(400, `Unknown user ${id}`);
+      const u = await first(db, 'SELECT access_role FROM users WHERE id = ?', id);
+      if (!u) throw new HttpError(400, `Unknown user ${id}`);
+      if (u.access_role === 'admin') throw new HttpError(400, "Admins can't take part in collections");
     }
     const add = db.prepare('INSERT INTO collection_members (collection_id, user_id) VALUES (?, ?)');
     await db.batch([

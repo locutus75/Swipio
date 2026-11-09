@@ -28,7 +28,8 @@ can pick up.
   anyone else gets an invite link to copy, email or share, and sets their own password
 - **Admins** run the platform: they see and can manage every collection, and manage all accounts
   under *Manage → People* (make someone admin, reset a password, **block** or delete an account).
-  The first account is the admin
+  The first account is the admin. Admins never take part in collections themselves: they can't be
+  ticked or invited as participants, and someone made admin is taken out of their collections
 - New sign-ups are capped at `SIGNUPS_PER_HOUR` (30) per hour. An optional bot check
   (Cloudflare Turnstile) can be switched on; see [Bot check on sign-up](#bot-check-on-sign-up-optional)
 

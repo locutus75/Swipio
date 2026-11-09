@@ -219,3 +219,21 @@ test('co-managers can be set to manage only, without liking', async () => {
   d = (await w.anna.c('GET', `/api/admin/collections/${cid}`)).data;
   assert.deepEqual(d.allocations.map((a) => a.userName), ['Bob']);
 });
+
+test('admins never take part in collections', async () => {
+  const w = await world();
+  const { cid } = await annasCollection(w);
+  const adaId = (await w.admin('GET', '/api/me')).data.user.id;
+  // Not as an existing account, not by ticking, not when inviting a new admin
+  assert.equal((await w.anna.c('POST', '/api/admin/users', { name: 'Ada', email: 'ada@example.com', collectionIds: [cid] })).status, 400);
+  assert.equal((await w.anna.c('PUT', `/api/admin/collections/${cid}/members`, { userIds: [adaId] })).status, 400);
+  const r = await w.admin('POST', '/api/admin/users', { name: 'Root', email: 'root@example.com', role: 'admin', collectionIds: [cid] });
+  assert.equal(r.status, 201);
+  assert.deepEqual((await w.admin('GET', `/api/admin/collections/${cid}`)).data.members, []);
+  // Promoting a participant to admin takes them out of their collections
+  await w.anna.c('POST', '/api/admin/users', { name: 'Bob', email: 'bob@example.com', collectionIds: [cid] });
+  await w.anna.c('PUT', `/api/admin/collections/${cid}/editors`, { userIds: [w.bob.id] });
+  await w.admin('PATCH', `/api/admin/users/${w.bob.id}`, { role: 'admin' });
+  const d = (await w.admin('GET', `/api/admin/collections/${cid}`)).data;
+  assert.deepEqual([d.members, d.editors], [[], []]);
+});
