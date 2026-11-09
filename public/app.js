@@ -1704,78 +1704,150 @@ async function viewAdminCollection(id, tab) {
   };
 
   // Admins: throw away the allocation and draw again (likes and participants as they are now).
-  function openReallocateSheet() {
+  // Admins: hand out free items only, or throw the whole allocation away and draw again.
+  // Uses everyone's likes and the participant list as they are now, minus items taken away.
+  function openReallocateSheet({ onlyFree = false } = {}) {
     // Counted now, not when the tab was drawn: pickups may have been ticked since.
     const collected = data.allocations.filter((a) => a.collected).length;
+    const mode = (value, title, text) =>
+      h(
+        'label',
+        { class: 'choice' },
+        h('input', { type: 'radio', name: 'mode', value, checked: (value === 'free') === onlyFree }),
+        h('div', {}, h('div', { class: 'name' }, title), h('div', { class: 'muted small' }, text))
+      );
     const keep = h('input', { type: 'checkbox', name: 'keep', checked: true });
+    const keepRow =
+      collected > 0 && h('label', { class: 'check' }, keep, `Keep the ${plural(collected, 'item')} already picked up with their person`);
     const form = h(
       'form',
       {
         class: 'stack',
         onsubmit: action(async (e) => {
-          const r = await api('POST', `/api/admin/collections/${id}/reallocate`, { keepCollected: collected ? keep.checked : true });
+          const free = formData(e.target).mode === 'free';
+          const r = await api('POST', `/api/admin/collections/${id}/reallocate`, free ? { onlyFree: true } : { keepCollected: collected ? keep.checked : true });
           dlg.close();
-          toast(r.kept ? `New allocation done. ${plural(r.kept, 'picked-up item')} stayed put.` : 'New allocation done');
+          toast(
+            free
+              ? r.allocated
+                ? `${plural(r.allocated, 'item')} handed out`
+                : 'Nothing to hand out: nobody else wants the free items'
+              : r.kept
+                ? `New allocation done. ${plural(r.kept, 'picked-up item')} stayed put.`
+                : 'New allocation done'
+          );
           reopen('results');
         }),
       },
-      h('p', {}, 'This removes the current allocation and hands everything out again with a fresh draw. It uses everyone\'s likes and the participant list as they are now.'),
-      h('p', { class: 'muted small' }, 'Participants see their new items straight away. Contested items may go to someone else this time.'),
-      collected > 0 &&
-        h('label', { class: 'check' }, keep, `Keep the ${plural(collected, 'item')} already picked up with their person`),
-      h('button', { class: 'primary block big-btn', type: 'submit' }, 'Redo allocation')
+      mode('free', 'Hand out free items only', 'Everyone keeps what they have. Free and taken-away items go to others who wanted them.'),
+      mode('all', 'Redo everything', 'Throw the allocation away and draw again. Contested items may go to someone else.'),
+      keepRow,
+      h('p', { class: 'muted small' }, "Uses everyone's likes and the participant list as they are now. People never get back an item that was taken away from them. Participants see the result straight away."),
+      h('button', { class: 'primary block big-btn', type: 'submit' }, 'Go')
     );
-    const dlg = openSheet('Redo allocation?', form);
+    const syncKeep = () => keepRow && (keepRow.style.display = form.querySelector('input[name=mode]:checked').value === 'free' ? 'none' : '');
+    form.addEventListener('change', syncKeep);
+    syncKeep();
+    const dlg = openSheet('Hand out again', form);
   }
 
+  // Admins: take items away from someone. The units become free for others.
+  const takeAway = (allocations, label) =>
+    action(async () => {
+      if (!(await confirmDialog(`${label} It becomes available for others, and they won't get it back in a new allocation.`))) return;
+      await api('POST', `/api/admin/collections/${id}/release`, { allocationIds: allocations.map((a) => a.id) });
+      toast('Taken away. Tap "Hand out again" to give it to someone else.');
+      reopen('results');
+    });
+
   const renderResultsByPerson = () => {
+    const isAdmin = can('admin');
     const byUser = new Map();
-    for (const a of data.allocations) {
-      if (!byUser.has(a.userId)) byUser.set(a.userId, { name: a.userName, list: [] });
-      byUser.get(a.userId).list.push(a);
-    }
+    const group = (userId, name) => {
+      if (!byUser.has(userId)) byUser.set(userId, { name, list: [], removed: [] });
+      return byUser.get(userId);
+    };
+    for (const a of data.allocations) group(a.userId, a.userName).list.push(a);
+    if (isAdmin) for (const x of data.removed) group(x.userId, x.userName).removed.push(x);
     const allocatedCount = new Map();
     data.allocations.forEach((a) => allocatedCount.set(a.itemId, (allocatedCount.get(a.itemId) || 0) + 1));
     const leftovers = data.items.map((i) => ({ ...i, left: i.quantity - (allocatedCount.get(i.id) || 0) })).filter((i) => i.left > 0);
     const summary = () =>
       `${plural(data.allocations.length, 'item')} allocated · ${data.allocations.filter((a) => a.collected).length} collected. Tick items off as people pick them up.`;
     const counter = h('p', { class: 'muted' }, summary());
+
+    const allocationRow = (a, g) =>
+      h(
+        'div',
+        { class: 'item-row' },
+        h(
+          'label',
+          { class: 'check grow' },
+          h('input', {
+            type: 'checkbox',
+            checked: a.collected,
+            onchange: action(async (e) => {
+              await api('PATCH', `/api/admin/allocations/${a.id}`, { collected: e.target.checked });
+              a.collected = e.target.checked;
+              counter.textContent = summary();
+            }),
+          }),
+          h('span', {}, a.itemTitle)
+        ),
+        isAdmin &&
+          h('button', {
+            class: 'ghost icon-btn',
+            title: 'Take away',
+            'aria-label': `Take ${a.itemTitle} away from ${g.name}`,
+            onclick: takeAway([a], `Take "${a.itemTitle}" away from ${g.name}?`),
+          }, '✕')
+      );
+
+    const removedRow = (x) =>
+      h(
+        'div',
+        { class: 'item-row removed-row' },
+        h('span', { class: 'grow' }, x.itemTitle),
+        h('button', {
+          class: 'ghost',
+          title: 'Undo: they may get it again in a new allocation',
+          onclick: action(async () => {
+            await api('POST', `/api/admin/collections/${id}/unrelease`, { userId: x.userId, itemId: x.itemId });
+            toast(`${x.userName} can get "${x.itemTitle}" again in a new allocation`);
+            reopen('results');
+          }),
+        }, '↩ Undo')
+      );
+
     return h(
       'div',
       {},
       counter,
-      can('admin') &&
+      isAdmin &&
         h(
           'div',
           { class: 'row spread', style: { marginBottom: '12px' } },
           h('span', { class: 'muted small' }, data.allocationRound ? `Allocation redone ${data.allocationRound}×` : ''),
-          h('button', { onclick: () => openReallocateSheet() }, '🔀 Redo allocation')
+          h('button', { onclick: () => openReallocateSheet({ onlyFree: data.removed.length > 0 }) }, '🔀 Hand out again')
         ),
       byUser.size
         ? h(
             'div',
             { class: 'list' },
-            [...byUser.values()].map((group) =>
+            [...byUser.values()].map((g) =>
               h(
                 'div',
                 { class: 'card' },
-                h('h3', {}, `${group.name} · ${group.list.length}`),
-                group.list.map((a) =>
-                  h(
-                    'label',
-                    { class: 'item-row check' },
-                    h('input', {
-                      type: 'checkbox',
-                      checked: a.collected,
-                      onchange: action(async (e) => {
-                        await api('PATCH', `/api/admin/allocations/${a.id}`, { collected: e.target.checked });
-                        a.collected = e.target.checked;
-                        counter.textContent = summary();
-                      }),
-                    }),
-                    h('span', { class: 'grow' }, a.itemTitle)
-                  )
-                )
+                h(
+                  'div',
+                  { class: 'row spread' },
+                  h('h3', { style: { margin: 0 } }, `${g.name} · ${g.list.length}`),
+                  isAdmin && g.list.length > 1 &&
+                    h('button', { class: 'ghost small', onclick: takeAway(g.list, `Take all ${g.list.length} items away from ${g.name}?`) }, 'Take all away')
+                ),
+                g.list.map((a) => allocationRow(a, g)),
+                g.removed.length > 0 &&
+                  h('div', { class: 'removed' }, h('div', { class: 'muted small' }, 'Taken away'), g.removed.map(removedRow))
               )
             )
           )
@@ -1784,8 +1856,11 @@ async function viewAdminCollection(id, tab) {
         h(
           'div',
           { class: 'section' },
-          h('h3', {}, 'Unclaimed'),
-          h('div', { class: 'card' }, leftovers.map((i) => h('div', { class: 'item-row' }, thumb(i), h('div', { class: 'grow name' }, i.title), h('span', { class: 'muted small' }, `${i.left} left`))))
+          h('div', { class: 'row spread' },
+            h('h3', { style: { margin: 0 } }, 'Unclaimed'),
+            isAdmin && data.removed.length > 0 && h('button', { class: 'primary', onclick: () => openReallocateSheet({ onlyFree: true }) }, 'Hand out free items')
+          ),
+          h('div', { class: 'card', style: { marginTop: '8px' } }, leftovers.map((i) => h('div', { class: 'item-row' }, thumb(i), h('div', { class: 'grow name' }, i.title), h('span', { class: 'muted small' }, `${i.left} left`))))
         )
     );
   };

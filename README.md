@@ -47,11 +47,18 @@ When a collection closes:
    items so far**. Remaining ties are broken by a seeded random draw, so results are fair
    and can be reproduced. The least contested items are handed out first.
 
-**Redoing an allocation (Admin).** On a closed collection's Results tab, **Redo allocation**
-throws the allocation away and draws again, using everyone's likes and the participant list as
-they are now. Each redo uses a new round in the random seed, so ties can fall differently. Items
-already ticked off as picked up stay with their person (unless you untick that option); they still
-count towards that person's total, so the split stays fair.
+**After the allocation (Admin).** On a closed collection's Results tab an admin can:
+- **Take items away** from someone (✕ per item, or *Take all away*). The units become free, and
+  that person is skipped for those items in any later allocation. *↩ Undo* reverses this.
+- **Hand out again**, in one of two ways:
+  - *Hand out free items only*: everyone keeps what they have; free and taken-away items go to
+    others who wanted them.
+  - *Redo everything*: throw the allocation away and draw again. Each redo uses a new round in the
+    random seed, so ties can fall differently. Items already ticked off as picked up stay with
+    their person (unless you untick that option) and count towards that person's total.
+
+Both use everyone's likes and the participant list as they are now. Re-opening a collection clears
+any take-aways.
 
 See `src/allocation.js`.
 

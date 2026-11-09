@@ -1027,3 +1027,39 @@ body:has(#app.has-action-bar) #toasts {
   background: rgba(255, 142, 60, 0.16);
   color: #d96a12;
 }
+
+/* Results: choice rows and taken-away items */
+.choice {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  font-weight: normal;
+}
+
+.choice:has(input:checked) {
+  border-color: var(--brand);
+  background: rgba(255, 77, 109, 0.06);
+}
+
+.choice input {
+  width: 20px;
+  height: 20px;
+  flex: none;
+  margin: 2px 0 0;
+  accent-color: var(--brand);
+}
+
+.removed {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border);
+}
+
+.removed-row .grow {
+  color: var(--muted);
+  text-decoration: line-through;
+  text-decoration-color: var(--nope);
+}

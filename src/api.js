@@ -44,7 +44,7 @@ export function createApi({ now = Date.now } = {}) {
   // The draw is seeded so results are reproducible; an admin's redo bumps the round for a fresh draw.
   const seedFor = (c, round = c.allocation_round || 0) => (round ? `${c.id}:${c.expires_at}:${round}` : `${c.id}:${c.expires_at}`);
 
-  /** Items and the likes of current members: the input for an allocation. */
+  /** Items and the likes of current members (minus items an admin took away): the input for an allocation. */
   async function allocationInput(db, collectionId) {
     const items = await all(db, 'SELECT id, quantity FROM items WHERE collection_id = ?', collectionId);
     const likes = await all(
@@ -54,6 +54,7 @@ export function createApi({ now = Date.now } = {}) {
          JOIN items i ON i.id = s.item_id
          JOIN collection_members m ON m.collection_id = i.collection_id AND m.user_id = s.user_id
         WHERE i.collection_id = ? AND s.liked = 1
+          AND NOT EXISTS (SELECT 1 FROM allocation_exclusions x WHERE x.item_id = s.item_id AND x.user_id = s.user_id)
         ORDER BY s.created_at`,
       collectionId
     );
@@ -582,7 +583,7 @@ export function createApi({ now = Date.now } = {}) {
     const { db } = ctx;
     const c = await managedCollection(ctx, ctx.params.id);
     const seeChoices = atLeast(ctx.user, 'manager');
-    const [items, members, allocations, swipes, editors, creator] = await Promise.all([
+    const [items, members, allocations, swipes, editors, creator, exclusions] = await Promise.all([
       all(
         db,
         `SELECT i.*,
@@ -627,6 +628,15 @@ export function createApi({ now = Date.now } = {}) {
         c.id
       ),
       c.created_by ? first(db, 'SELECT id, name FROM users WHERE id = ?', c.created_by) : null,
+      seeChoices
+        ? all(
+            db,
+            `SELECT x.user_id, x.item_id, u.name AS user_name, i.title AS item_title
+               FROM allocation_exclusions x JOIN items i ON i.id = x.item_id JOIN users u ON u.id = x.user_id
+              WHERE i.collection_id = ? ORDER BY u.name COLLATE NOCASE, i.title COLLATE NOCASE`,
+            c.id
+          )
+        : [],
     ]);
     return {
       collection: serializeCollection(c),
@@ -634,6 +644,7 @@ export function createApi({ now = Date.now } = {}) {
       createdBy: creator ? { id: creator.id, name: creator.name } : null,
       editors,
       allocationRound: c.allocation_round || 0,
+      removed: exclusions.map((x) => ({ userId: x.user_id, userName: x.user_name, itemId: x.item_id, itemTitle: x.item_title })),
       canDelete: seeChoices || c.created_by === ctx.user.id,
       canManageEditors: seeChoices,
       items: items.map((i) => ({ ...serializeItem(i), likes: i.likes, passes: i.passes, allocated: i.allocated })),
@@ -666,7 +677,8 @@ export function createApi({ now = Date.now } = {}) {
     let finalizedAt = c.finalized_at;
     if (finalizedAt !== null && expiresAt > now()) {
       stmts.push(
-        db.prepare('DELETE FROM allocations WHERE item_id IN (SELECT id FROM items WHERE collection_id = ?)').bind(c.id)
+        db.prepare('DELETE FROM allocations WHERE item_id IN (SELECT id FROM items WHERE collection_id = ?)').bind(c.id),
+        db.prepare('DELETE FROM allocation_exclusions WHERE item_id IN (SELECT id FROM items WHERE collection_id = ?)').bind(c.id)
       );
       finalizedAt = null;
     }
@@ -694,12 +706,14 @@ export function createApi({ now = Date.now } = {}) {
   route('POST', '/api/admin/collections/:id/reallocate', { role: 'admin' }, async ({ db, params, body }) => {
     const c = await getCollection(db, params.id);
     if (c.finalized_at === null) throw new HttpError(409, 'This collection has not been allocated yet');
-    const keepCollected = body.keepCollected !== false;
+    // onlyFree: everyone keeps what they have and only free units (e.g. taken away) are handed out.
+    const onlyFree = body.onlyFree === true;
+    const keepCollected = onlyFree || body.keepCollected !== false;
     const kept = keepCollected
       ? await all(
           db,
           `SELECT a.item_id AS itemId, a.user_id AS userId FROM allocations a JOIN items i ON i.id = a.item_id
-            WHERE i.collection_id = ? AND a.collected_at IS NOT NULL`,
+            WHERE i.collection_id = ?${onlyFree ? '' : ' AND a.collected_at IS NOT NULL'}`,
           c.id
         )
       : [];
@@ -707,16 +721,59 @@ export function createApi({ now = Date.now } = {}) {
     const round = (c.allocation_round || 0) + 1;
     const fresh = allocate({ items, likes, seed: seedFor(c, round), fixed: kept });
     const insert = db.prepare('INSERT OR IGNORE INTO allocations (item_id, user_id) VALUES (?, ?)');
+    const clear = onlyFree
+      ? [] // everyone keeps what they have
+      : [
+          db
+            .prepare(
+              `DELETE FROM allocations WHERE item_id IN (SELECT id FROM items WHERE collection_id = ?)${keepCollected ? ' AND collected_at IS NULL' : ''}`
+            )
+            .bind(c.id),
+        ];
     await db.batch([
-      db
-        .prepare(
-          `DELETE FROM allocations WHERE item_id IN (SELECT id FROM items WHERE collection_id = ?)${keepCollected ? ' AND collected_at IS NULL' : ''}`
-        )
-        .bind(c.id),
+      ...clear,
       ...fresh.map((a) => insert.bind(a.itemId, a.userId)),
       db.prepare('UPDATE collections SET allocation_round = ?, finalized_at = ? WHERE id = ?').bind(round, now(), c.id),
     ]);
     return { collection: serializeCollection(await getCollection(db, c.id)), round, kept: kept.length, allocated: fresh.length };
+  });
+
+  // Admins can take allocated items away from someone. The units become free, and that person
+  // is skipped for those items in later (re)allocations.
+  route('POST', '/api/admin/collections/:id/release', { role: 'admin' }, async ({ db, params, body }) => {
+    const c = await getCollection(db, params.id);
+    if (!Array.isArray(body.allocationIds) || !body.allocationIds.length) {
+      throw new HttpError(400, 'allocationIds must be a non-empty array');
+    }
+    const rows = [];
+    for (const id of new Set(body.allocationIds.map(Number))) {
+      const a = await first(
+        db,
+        'SELECT a.id, a.item_id, a.user_id FROM allocations a JOIN items i ON i.id = a.item_id WHERE a.id = ? AND i.collection_id = ?',
+        id,
+        c.id
+      );
+      if (!a) throw new HttpError(404, `Allocation ${id} not found in this collection`);
+      rows.push(a);
+    }
+    const exclude = db.prepare('INSERT OR IGNORE INTO allocation_exclusions (item_id, user_id, created_at) VALUES (?, ?, ?)');
+    const remove = db.prepare('DELETE FROM allocations WHERE id = ?');
+    await db.batch(rows.flatMap((a) => [exclude.bind(a.item_id, a.user_id, now()), remove.bind(a.id)]));
+    return { ok: true, released: rows.length };
+  });
+
+  // Undo a take-away: the person may get the item again in a later (re)allocation.
+  route('POST', '/api/admin/collections/:id/unrelease', { role: 'admin' }, async ({ db, params, body }) => {
+    const c = await getCollection(db, params.id);
+    const r = await run(
+      db,
+      'DELETE FROM allocation_exclusions WHERE user_id = ? AND item_id IN (SELECT id FROM items WHERE id = ? AND collection_id = ?)',
+      Number(body.userId),
+      Number(body.itemId),
+      c.id
+    );
+    if (!r.meta.changes) throw new HttpError(404, 'Nothing to undo');
+    return { ok: true };
   });
 
   route('DELETE', '/api/admin/collections/:id', { role: 'creator' }, async (ctx) => {

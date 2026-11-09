@@ -242,3 +242,67 @@ test('admins can redo an allocation; picked-up items stay put by default', async
   r = await t.admin('GET', `/api/admin/collections/${cid}`);
   assert.equal(r.data.allocations.filter((x) => x.collected).length, 0);
 });
+
+test('admins can take items away from someone and hand them to others', async () => {
+  const t = await team();
+  const { data } = await t.admin('POST', '/api/admin/collections', { name: 'Take', expiresAt: t.srv.now() + HOUR, published: true });
+  const cid = data.collection.id;
+  const bike = (await t.admin('POST', `/api/admin/collections/${cid}/items`, { title: 'Bike' })).data.item;
+  const lamp = (await t.admin('POST', `/api/admin/collections/${cid}/items`, { title: 'Lamp' })).data.item;
+  const ole = await (async () => {
+    const { data: d } = await t.admin('POST', '/api/admin/users', { name: 'Ole', email: 'ole@example.com' });
+    const c = t.srv.client();
+    await c('POST', `/api/invites/${d.user.inviteToken}`, { password: 'olepassword' });
+    return { client: c, id: d.user.id };
+  })();
+  await t.admin('PUT', `/api/admin/collections/${cid}/members`, { userIds: [t.participant.id, ole.id] });
+  // Pim wants both; Ole only wants the bike.
+  await t.participant.client('PUT', `/api/items/${bike.id}/swipe`, { liked: true });
+  await t.participant.client('PUT', `/api/items/${lamp.id}/swipe`, { liked: true });
+  await ole.client('PUT', `/api/items/${bike.id}/swipe`, { liked: true });
+  await t.admin('POST', `/api/admin/collections/${cid}/close`);
+
+  const results = async () => (await t.admin('GET', `/api/admin/collections/${cid}`)).data;
+  const who = (d, title) => d.allocations.filter((a) => a.itemTitle === title).map((a) => a.userName);
+  let d = await results();
+  // Lamp only Pim wants -> Pim. Bike contested; Ole has fewer items -> Ole.
+  assert.deepEqual(who(d, 'Lamp'), ['Pim']);
+  assert.deepEqual(who(d, 'Bike'), ['Ole']);
+
+  // Only admins
+  const bikeAlloc = d.allocations.find((a) => a.itemTitle === 'Bike');
+  assert.equal((await t.manager.client('POST', `/api/admin/collections/${cid}/release`, { allocationIds: [bikeAlloc.id] })).status, 403);
+  // Not from another collection
+  const other = (await t.admin('POST', '/api/admin/collections', { name: 'Other', expiresAt: t.srv.now() + HOUR })).data.collection;
+  assert.equal((await t.admin('POST', `/api/admin/collections/${other.id}/release`, { allocationIds: [bikeAlloc.id] })).status, 404);
+
+  // Take the bike away from Ole: it's free now and Ole is listed as removed
+  assert.equal((await t.admin('POST', `/api/admin/collections/${cid}/release`, { allocationIds: [bikeAlloc.id] })).status, 200);
+  d = await results();
+  assert.deepEqual(who(d, 'Bike'), []);
+  assert.deepEqual(d.removed.map((x) => `${x.userName}:${x.itemTitle}`), ['Ole:Bike']);
+  assert.equal((await ole.client('GET', `/api/collections/${cid}`)).data.items.find((i) => i.id === bike.id).won, false);
+
+  // Hand out only free items: the bike goes to Pim (Ole is skipped), the lamp stays with Pim
+  const r = await t.admin('POST', `/api/admin/collections/${cid}/reallocate`, { onlyFree: true });
+  assert.equal(r.data.allocated, 1);
+  d = await results();
+  assert.deepEqual(who(d, 'Bike'), ['Pim']);
+  assert.deepEqual(who(d, 'Lamp'), ['Pim']);
+
+  // A full redo also keeps skipping Ole for the bike
+  await t.admin('POST', `/api/admin/collections/${cid}/reallocate`, { keepCollected: false });
+  assert.deepEqual(who(await results(), 'Bike'), ['Pim']);
+
+  // Undo the take-away, then a full redo may give it to Ole again (fewest items wins)
+  assert.equal((await t.admin('POST', `/api/admin/collections/${cid}/unrelease`, { userId: ole.id, itemId: bike.id })).status, 200);
+  await t.admin('POST', `/api/admin/collections/${cid}/reallocate`, {});
+  d = await results();
+  assert.deepEqual(d.removed, []);
+  assert.deepEqual(who(d, 'Bike'), ['Ole']);
+
+  // Re-opening clears take-aways
+  await t.admin('POST', `/api/admin/collections/${cid}/release`, { allocationIds: [d.allocations.find((a) => a.itemTitle === 'Bike').id] });
+  await t.admin('PATCH', `/api/admin/collections/${cid}`, { expiresAt: t.srv.now() + HOUR });
+  assert.deepEqual((await results()).removed, []);
+});

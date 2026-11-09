@@ -30,10 +30,10 @@ test('0002_roles upgrades an existing database without losing data', () => {
   assert.throws(() => db.exec("UPDATE users SET access_role = 'king' WHERE id = 2"), /CHECK/);
 });
 
-test('0003 and 0004 apply on top of 0002', () => {
+test('later migrations apply on top of 0002', () => {
   const db = new DatabaseSync(':memory:');
   db.exec('PRAGMA foreign_keys = ON;');
-  for (const f of ['0001_init.sql', '0002_roles.sql', '0003_collection_editors.sql', '0004_allocation_round.sql']) db.exec(sql(f));
+  for (const f of ['0001_init.sql', '0002_roles.sql', '0003_collection_editors.sql', '0004_allocation_round.sql', '0005_allocation_exclusions.sql']) db.exec(sql(f));
   db.exec(`
     INSERT INTO users (id, name, email, created_at) VALUES (1, 'Cas', 'cas@x', 0);
     INSERT INTO collections (id, name, expires_at, created_at) VALUES (1, 'C', 0, 0);
