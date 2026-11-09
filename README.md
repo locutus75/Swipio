@@ -42,6 +42,9 @@ can pick up.
 ### How items are allocated
 
 When a collection closes:
+0. Items with the same name (ignoring capitals and extra spaces) count as **one product**: if
+   "Dopper" was added three times, it is handed out as one product with 3 units, and nobody gets
+   more than one. (Each person gets at most one of any product.)
 1. If no more people liked an item than there are units, everyone who liked it gets one.
 2. Contested items go to the people who liked them and have been allocated the **fewest
    items so far**. Remaining ties are broken by a seeded random draw, so results are fair

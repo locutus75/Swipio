@@ -188,3 +188,19 @@ test('non-members cannot see or swipe a collection', async () => {
   assert.equal((await zed('GET', `/api/collections/${data.collection.id}`)).status, 404);
   assert.equal((await zed('PUT', `/api/items/${item.id}/swipe`, { liked: true })).status, 404);
 });
+
+test('items with the same name count as one product when allocating', async () => {
+  const srv = setup();
+  const admin = srv.client();
+  await admin('POST', '/api/setup', { name: 'Ada', email: 'ada@example.com', password: 'supersecret' });
+  const cid = (await admin('POST', '/api/admin/collections', { name: 'C', expiresAt: srv.now() + HOUR, published: true })).data.collection.id;
+  const ids = [];
+  for (const title of ['Dopper', 'dopper ', 'DOPPER']) ids.push((await admin('POST', `/api/admin/collections/${cid}/items`, { title })).data.item.id);
+  const { data } = await admin('POST', '/api/admin/users', { name: 'Ann', email: 'ann@example.com', collectionIds: [cid] });
+  const ann = srv.client();
+  await ann('POST', `/api/invites/${data.user.inviteToken}`, { password: 'annpassword' });
+  for (const id of ids) await ann('PUT', `/api/items/${id}/swipe`, { liked: true });
+  await admin('POST', `/api/admin/collections/${cid}/close`);
+  const won = (await ann('GET', `/api/collections/${cid}`)).data.items.filter((i) => i.won);
+  assert.equal(won.length, 1, 'only one Dopper');
+});

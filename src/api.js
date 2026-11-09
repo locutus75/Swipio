@@ -8,7 +8,7 @@
 //
 // Vars (see wrangler.toml): ALLOWED_ORIGINS, PASSWORD_ITERATIONS. Binding: DB (D1).
 
-import { allocate } from './allocation.js';
+import { allocate, productKey } from './allocation.js';
 import * as auth from './auth.js';
 
 class HttpError extends Error {
@@ -46,7 +46,12 @@ export function createApi({ now = Date.now } = {}) {
 
   /** Items and the likes of current members (minus items an admin took away): the input for an allocation. */
   async function allocationInput(db, collectionId) {
-    const items = await all(db, 'SELECT id, quantity FROM items WHERE collection_id = ?', collectionId);
+    // Same name = same product, so nobody gets two of it (e.g. three separate "Dopper" items).
+    const items = (await all(db, 'SELECT id, quantity, title FROM items WHERE collection_id = ?', collectionId)).map((i) => ({
+      id: i.id,
+      quantity: i.quantity,
+      group: productKey(i.title),
+    }));
     const likes = await all(
       db,
       `SELECT s.item_id AS itemId, s.user_id AS userId

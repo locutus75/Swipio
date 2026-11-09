@@ -85,3 +85,37 @@ test('a different seed can change who wins a tie', () => {
   for (let round = 0; round < 20; round++) winners.add(allocate({ items, likes, seed: `1:0:${round}` })[0].userId);
   assert.ok(winners.size > 1, 'redoing with a new round should be able to pick someone else');
 });
+
+test('nobody gets two of the same product, even when it is entered as separate items', () => {
+  // Three separate "Dopper" items, one unit each. Anna likes all three; Bob likes one.
+  const items = [1, 2, 3].map((id) => ({ id, quantity: 1, group: 'dopper' }));
+  const likes = [
+    { itemId: 1, userId: 1 },
+    { itemId: 2, userId: 1 },
+    { itemId: 3, userId: 1 },
+    { itemId: 2, userId: 2 },
+  ];
+  const result = allocate({ items, likes, seed: 's' });
+  const perUser = {};
+  for (const { userId } of result) perUser[userId] = (perUser[userId] || 0) + 1;
+  assert.deepEqual(perUser, { 1: 1, 2: 1 });
+  // Bob gets the one he liked; Anna one of the others
+  assert.equal(result.find((r) => r.userId === 2).itemId, 2);
+  assert.notEqual(result.find((r) => r.userId === 1).itemId, 2);
+});
+
+test('a product entered as separate items is shared out over the most people', () => {
+  const items = [1, 2, 3].map((id) => ({ id, quantity: 1, group: 'dopper' }));
+  const likes = [];
+  for (let u = 1; u <= 5; u++) for (const id of [1, 2, 3]) likes.push({ itemId: id, userId: u });
+  const result = allocate({ items, likes, seed: 'x' });
+  assert.equal(result.length, 3);
+  assert.equal(new Set(result.map((r) => r.userId)).size, 3, 'three different people');
+  assert.equal(new Set(result.map((r) => r.itemId)).size, 3, 'each item used once');
+});
+
+test('someone who already has a product (picked up) does not get a second one', () => {
+  const items = [{ id: 1, quantity: 1, group: 'dopper' }, { id: 2, quantity: 1, group: 'dopper' }];
+  const likes = [{ itemId: 1, userId: 1 }, { itemId: 2, userId: 1 }];
+  assert.deepEqual(allocate({ items, likes, seed: 'x', fixed: [{ itemId: 1, userId: 1 }] }), []);
+});

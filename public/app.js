@@ -1800,11 +1800,19 @@ async function viewAdminCollection(id, tab) {
     // Why is an item not (fully) handed out? Explains each leftover, so it doesn't look like a mistake.
     const memberName = (userId) => data.members.find((m) => m.id === userId)?.name;
     const names = (list) => (list.length <= 3 ? list.join(', ') : `${list.slice(0, 3).join(', ')} and ${list.length - 3} more`);
+    // Same name = same product (as the allocation treats it): nobody gets two.
+    const productKey = (title) => String(title || '').trim().toLowerCase().replace(/\s+/g, ' ');
     const leftoverReason = (item) => {
-      const holders = new Set(data.allocations.filter((a) => a.itemId === item.id).map((a) => a.userId));
+      const siblings = new Set(data.items.filter((i) => productKey(i.title) === productKey(item.title)).map((i) => i.id));
+      const holders = new Set(data.allocations.filter((a) => siblings.has(a.itemId)).map((a) => a.userId));
       const takenFrom = new Set(data.removed.filter((x) => x.itemId === item.id).map((x) => x.userId));
       const memberLikers = data.choices.filter((c) => c.itemId === item.id && c.liked).map((c) => c.userId);
-      const eligible = memberLikers.filter((u) => !holders.has(u) && !takenFrom.has(u)).map(memberName).filter(Boolean);
+      // Anyone who liked any item of this product (and didn't have that item taken away) can get this unit.
+      const excluded = (userId, itemId) => data.removed.some((x) => x.userId === userId && x.itemId === itemId);
+      const productLikers = new Set(
+        data.choices.filter((c) => siblings.has(c.itemId) && c.liked && !excluded(c.userId, c.itemId)).map((c) => c.userId)
+      );
+      const eligible = [...productLikers].filter((u) => !holders.has(u)).map(memberName).filter(Boolean);
       const formerLikes = item.likes - memberLikers.length; // likes from people no longer participating
       if (eligible.length) return { canHandOut: true, text: `Wanted by ${names(eligible)}. Tap "Hand out free items".` };
       const former = formerLikes > 0 ? `${plural(formerLikes, 'person', 'people')} who no longer participate${formerLikes === 1 ? 's' : ''}` : '';

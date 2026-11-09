@@ -1,66 +1,109 @@
 /**
  * Decides who gets which item once a collection's timer has expired.
  *
- * - An item liked by no more people than its quantity goes to everyone who liked it.
- * - A contested item (more likers than units) is handed out fairly: likers who have
+ * - Items that are the same product (same `group`, e.g. three separate "Dopper" items) are
+ *   treated as one product with their quantities added up: nobody gets more than one of a
+ *   product. Items without a group are each their own product.
+ * - A product liked by no more people than its quantity goes to everyone who liked it.
+ * - A contested product (more likers than units) is handed out fairly: likers who have
  *   received the fewest items so far go first, and remaining ties are broken by a
  *   seeded shuffle so results are reproducible.
- * - Contested items are processed from least to most contested, so that a person
- *   winning a hotly contested item does not also hoover up the easier ones.
+ * - Contested products are processed from least to most contested, so that a person
+ *   winning a hotly contested product does not also hoover up the easier ones.
  * - `fixed` allocations (e.g. items already picked up when an admin redoes the allocation)
  *   stay as they are: they use up units and count towards each person's total, and only
  *   the new allocations are returned.
  *
- * @param {{items: {id:number, quantity:number}[], likes: {itemId:number, userId:number}[], seed: string|number, fixed?: {itemId:number, userId:number}[]}} input
+ * @param {{items: {id:number, quantity:number, group?:string}[], likes: {itemId:number, userId:number}[], seed: string|number, fixed?: {itemId:number, userId:number}[]}} input
  * @returns {{itemId:number, userId:number}[]}
  */
 export function allocate({ items, likes, seed, fixed = [] }) {
   const rand = mulberry32(hashString(String(seed)));
-  const likersByItem = new Map();
-  for (const { itemId, userId } of likes) {
-    if (!likersByItem.has(itemId)) likersByItem.set(itemId, []);
-    const list = likersByItem.get(itemId);
-    if (!list.includes(userId)) list.push(userId);
+  const itemById = new Map(items.map((i) => [i.id, i]));
+  const groupOf = (item) => (item.group ? `g:${item.group}` : `i:${item.id}`);
+
+  // One entry per product, holding its items in id order.
+  const products = new Map();
+  for (const item of [...items].sort((a, b) => a.id - b.id)) {
+    const key = groupOf(item);
+    if (!products.has(key)) products.set(key, { key, items: [], firstId: item.id });
+    products.get(key).items.push(item);
   }
 
-  const counts = new Map();
-  const taken = new Map(); // itemId -> Set of userIds that already have one
+  const remaining = new Map(items.map((i) => [i.id, Math.max(0, Math.floor(i.quantity))]));
+  const counts = new Map(); // userId -> items received
+  const has = new Map(); // product key -> Set of userIds that already have one
+  const hasProduct = (key) => has.get(key) || has.set(key, new Set()).get(key);
+  const seen = new Set();
   for (const { itemId, userId } of fixed) {
-    if (!taken.has(itemId)) taken.set(itemId, new Set());
-    if (taken.get(itemId).has(userId)) continue;
-    taken.get(itemId).add(userId);
+    const item = itemById.get(itemId);
+    if (!item || seen.has(`${itemId}:${userId}`)) continue;
+    seen.add(`${itemId}:${userId}`);
+    remaining.set(itemId, Math.max(0, remaining.get(itemId) - 1));
+    hasProduct(groupOf(item)).add(userId);
     counts.set(userId, (counts.get(userId) || 0) + 1);
   }
+
+  // Who liked which items of each product (in order of liking).
+  const likedItems = new Map(); // `${key}:${userId}` -> [itemIds]
+  const likersOf = new Map(); // key -> [userIds]
+  for (const { itemId, userId } of likes) {
+    const item = itemById.get(itemId);
+    if (!item) continue;
+    const key = groupOf(item);
+    if (!likersOf.has(key)) likersOf.set(key, []);
+    if (!likersOf.get(key).includes(userId)) likersOf.get(key).push(userId);
+    const k = `${key}:${userId}`;
+    if (!likedItems.has(k)) likedItems.set(k, []);
+    if (!likedItems.get(k).includes(itemId)) likedItems.get(k).push(itemId);
+  }
+
   const result = [];
-  const give = (itemId, userId) => {
-    result.push({ itemId, userId });
-    counts.set(userId, (counts.get(userId) || 0) + 1);
+  /** Gives each winner one concrete item of the product, preferring an item they liked. */
+  const giveProduct = (product, winners) => {
+    // People who liked fewer of the product's items choose first, so everyone can get one they liked.
+    const ordered = [...winners].sort(
+      (a, b) => likedItems.get(`${product.key}:${a}`).length - likedItems.get(`${product.key}:${b}`).length
+    );
+    for (const userId of ordered) {
+      const liked = likedItems.get(`${product.key}:${userId}`);
+      const item =
+        product.items.find((i) => liked.includes(i.id) && remaining.get(i.id) > 0) ||
+        product.items.find((i) => remaining.get(i.id) > 0);
+      if (!item) continue;
+      remaining.set(item.id, remaining.get(item.id) - 1);
+      hasProduct(product.key).add(userId);
+      counts.set(userId, (counts.get(userId) || 0) + 1);
+      result.push({ itemId: item.id, userId });
+    }
   };
 
   const contested = [];
-  for (const item of items) {
-    const already = taken.get(item.id) || new Set();
-    const likers = (likersByItem.get(item.id) || []).filter((u) => !already.has(u));
-    const qty = Math.max(0, Math.floor(item.quantity) - already.size);
-    if (likers.length <= qty) {
-      for (const userId of likers) give(item.id, userId);
-    } else if (qty > 0) {
-      contested.push({ item, likers, qty });
-    }
+  for (const product of products.values()) {
+    const already = hasProduct(product.key);
+    const likers = (likersOf.get(product.key) || []).filter((u) => !already.has(u));
+    const qty = product.items.reduce((n, i) => n + remaining.get(i.id), 0);
+    if (likers.length <= qty) giveProduct(product, likers);
+    else if (qty > 0) contested.push({ product, likers, qty });
   }
 
   contested.sort(
-    (a, b) => a.likers.length / a.qty - b.likers.length / b.qty || a.item.id - b.item.id
+    (a, b) => a.likers.length / a.qty - b.likers.length / b.qty || a.product.firstId - b.product.firstId
   );
 
-  for (const { item, likers, qty } of contested) {
+  for (const { product, likers, qty } of contested) {
     const pool = shuffle([...likers].sort((a, b) => a - b), rand);
     // Array#sort is stable, so the shuffle decides among equal counts.
     pool.sort((a, b) => (counts.get(a) || 0) - (counts.get(b) || 0));
-    for (const userId of pool.slice(0, qty)) give(item.id, userId);
+    giveProduct(product, pool.slice(0, qty));
   }
 
   return result;
+}
+
+/** Items count as the same product when their names match, ignoring case and extra spaces. */
+export function productKey(title) {
+  return String(title || '').trim().toLowerCase().replace(/\s+/g, ' ');
 }
 
 function shuffle(arr, rand) {
