@@ -334,3 +334,87 @@ test('admins can change a participant\'s likes, also after closing', async () =>
   await t.admin('PUT', `/api/admin/collections/${cid}/choices`, { userId: t.participant.id, itemId: lamp.id, liked: null });
   assert.deepEqual(await choices(), []);
 });
+
+test('allocation versions: saved before changes, restorable, exportable and importable', async () => {
+  const t = await team();
+  const { data } = await t.admin('POST', '/api/admin/collections', { name: 'Versions', expiresAt: t.srv.now() + HOUR, published: true });
+  const cid = data.collection.id;
+  const bike = (await t.admin('POST', `/api/admin/collections/${cid}/items`, { title: 'Bike' })).data.item;
+  const lamp = (await t.admin('POST', `/api/admin/collections/${cid}/items`, { title: 'Lamp' })).data.item;
+  await t.admin('PUT', `/api/admin/collections/${cid}/members`, { userIds: [t.participant.id] });
+  for (const it of [bike, lamp]) await t.participant.client('PUT', `/api/items/${it.id}/swipe`, { liked: true });
+
+  // Nothing to export before the collection is allocated
+  assert.equal((await t.admin('GET', `/api/admin/collections/${cid}/allocation`)).status, 409);
+  await t.admin('POST', `/api/admin/collections/${cid}/close`);
+  const titles = async () => (await t.admin('GET', `/api/admin/collections/${cid}`)).data.allocations.map((a) => a.itemTitle).sort();
+
+  // Mark the bike as picked up, then export
+  let d = (await t.admin('GET', `/api/admin/collections/${cid}`)).data;
+  await t.admin('PATCH', `/api/admin/allocations/${d.allocations.find((a) => a.itemTitle === 'Bike').id}`, { collected: true });
+  const exported = (await t.admin('GET', `/api/admin/collections/${cid}/allocation`)).data;
+  assert.equal(exported.format, 'swipio-allocation');
+  assert.deepEqual(exported.allocations.map((a) => a.itemTitle).sort(), ['Bike', 'Lamp']);
+  assert.ok(exported.allocations.find((a) => a.itemTitle === 'Bike').collectedAt);
+
+  // Only admins
+  assert.equal((await t.manager.client('GET', `/api/admin/collections/${cid}/allocation`)).status, 403);
+  assert.equal((await t.manager.client('GET', `/api/admin/collections/${cid}/allocation/versions`)).status, 403);
+
+  // Taking everything away saves a version first
+  d = (await t.admin('GET', `/api/admin/collections/${cid}`)).data;
+  await t.admin('POST', `/api/admin/collections/${cid}/release`, { allocationIds: d.allocations.map((a) => a.id) });
+  assert.deepEqual(await titles(), []);
+  let versions = (await t.admin('GET', `/api/admin/collections/${cid}/allocation/versions`)).data.versions;
+  assert.equal(versions.length, 1);
+  assert.equal(versions[0].label, 'Before taking 2 items away');
+  assert.equal(versions[0].items, 2);
+  assert.equal(versions[0].by, 'Ada');
+
+  // Restore it: both items back, pickup status too, and the take-aways are gone
+  let r = await t.admin('POST', `/api/admin/collections/${cid}/allocation/versions/${versions[0].id}/restore`);
+  assert.equal(r.status, 200);
+  assert.equal(r.data.restored, 2);
+  d = (await t.admin('GET', `/api/admin/collections/${cid}`)).data;
+  assert.deepEqual(d.allocations.map((a) => a.itemTitle).sort(), ['Bike', 'Lamp']);
+  assert.equal(d.allocations.find((a) => a.itemTitle === 'Bike').collected, true);
+  assert.deepEqual(d.removed, []);
+  versions = (await t.admin('GET', `/api/admin/collections/${cid}/allocation/versions`)).data.versions;
+  assert.equal(versions[0].label, 'Before restoring a version', 'restoring is itself undoable');
+  assert.equal(versions[0].items, 0);
+
+  // Download a version
+  const v = (await t.admin('GET', `/api/admin/collections/${cid}/allocation/versions/${versions[1].id}`)).data;
+  assert.equal(v.allocations.length, 2);
+
+  // Import: empty the allocation, then import the exported file
+  await t.admin('POST', `/api/admin/collections/${cid}/allocation/import`, { ...exported, allocations: [] });
+  assert.deepEqual(await titles(), []);
+  r = await t.admin('POST', `/api/admin/collections/${cid}/allocation/import`, exported);
+  assert.equal(r.data.restored, 2);
+  assert.deepEqual(await titles(), ['Bike', 'Lamp']);
+
+  // Items that no longer exist are skipped and reported
+  await t.admin('DELETE', `/api/admin/items/${lamp.id}`);
+  r = await t.admin('POST', `/api/admin/collections/${cid}/allocation/import`, exported);
+  assert.equal(r.data.restored, 1);
+  assert.deepEqual(r.data.skipped.map((s) => `${s.itemTitle}: ${s.reason}`), ['Lamp: item no longer exists']);
+
+  // Wrong files are refused and change nothing
+  const before = (await t.admin('GET', `/api/admin/collections/${cid}/allocation/versions`)).data.versions.length;
+  assert.equal((await t.admin('POST', `/api/admin/collections/${cid}/allocation/import`, { hello: 'world' })).status, 400);
+  r = await t.admin('POST', `/api/admin/collections/${cid}/allocation/import`, { ...exported, collection: { id: 999, name: 'Other' } });
+  assert.equal(r.status, 400);
+  assert.match(r.data.error, /another collection/);
+  assert.equal((await t.admin('GET', `/api/admin/collections/${cid}/allocation/versions`)).data.versions.length, before);
+});
+
+test('only the newest 30 versions are kept', async () => {
+  const t = await team();
+  const { data } = await t.admin('POST', '/api/admin/collections', { name: 'Many', expiresAt: t.srv.now() + HOUR, published: true });
+  const cid = data.collection.id;
+  await t.admin('POST', `/api/admin/collections/${cid}/items`, { title: 'X' });
+  await t.admin('POST', `/api/admin/collections/${cid}/close`);
+  for (let i = 0; i < 32; i++) await t.admin('POST', `/api/admin/collections/${cid}/reallocate`, { onlyFree: true });
+  assert.equal((await t.admin('GET', `/api/admin/collections/${cid}/allocation/versions`)).data.versions.length, 30);
+});

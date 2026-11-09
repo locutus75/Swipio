@@ -1117,6 +1117,21 @@ function pickPhotos({ camera = false, multiple = false } = {}) {
   });
 }
 
+/** Opens a file picker for one file; resolves with the file, or null if cancelled. */
+function pickFile(accept) {
+  return new Promise((resolve) => {
+    const input = h('input', { type: 'file', accept, style: { display: 'none' } });
+    const done = (file) => {
+      input.remove();
+      resolve(file || null);
+    };
+    input.addEventListener('change', () => done(input.files[0]));
+    input.addEventListener('cancel', () => done(null));
+    document.body.append(input);
+    input.click();
+  });
+}
+
 function stepper(name, value = 1) {
   const input = h('input', { name, type: 'number', min: 1, max: 10000, value, inputmode: 'numeric', 'aria-label': 'Quantity' });
   const bump = (d) => {
@@ -2023,9 +2038,115 @@ async function viewAdminCollection(id, tab) {
               )
             )
           )
-        )
+        ),
+      isAdmin && renderVersions()
     );
   };
+
+  // Admins: earlier versions of the allocation (saved automatically before every change),
+  // plus export to / import from a file.
+  function renderVersions() {
+    const list = h('div', {}, h('p', { class: 'muted small' }, 'Loading…'));
+    const fileName = (stamp) =>
+      `swipio-${c.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'collection'}-${stamp}.json`;
+    const download = (snapshot, stamp) => {
+      const url = URL.createObjectURL(new Blob([JSON.stringify(snapshot, null, 2)], { type: 'application/json' }));
+      const a = h('a', { href: url, download: fileName(stamp) });
+      document.body.append(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    };
+    const stampOf = (ms) => new Date(ms).toISOString().slice(0, 16).replace(/[:T]/g, '-');
+    const afterRestore = (r, what) => {
+      toast(r.skipped.length ? `${what}: ${plural(r.restored, 'item')} back, ${r.skipped.length} skipped` : `${what}: ${plural(r.restored, 'item')} back`);
+      if (r.skipped.length) {
+        openSheet(
+          'Some items were skipped',
+          h('div', { class: 'stack' },
+            h('p', { class: 'muted small' }, 'These were in the saved version but could not be put back:'),
+            h('div', { class: 'card' }, r.skipped.map((x) => h('div', { class: 'item-row' }, h('div', { class: 'grow' }, h('div', { class: 'name' }, x.itemTitle || '?'), h('div', { class: 'muted small' }, `${x.userName || '?'} · ${x.reason}`)))))
+          ),
+          { onClose: () => reopen('results') }
+        );
+      } else {
+        reopen('results');
+      }
+    };
+
+    const exportNow = action(async () => {
+      download(await api('GET', `/api/admin/collections/${id}/allocation`), stampOf(Date.now()));
+      toast('Allocation downloaded');
+    });
+
+    const importFile = () =>
+      pickFile('application/json,.json').then(
+        action(async (file) => {
+          if (!file) return;
+          let snapshot;
+          try {
+            snapshot = JSON.parse(await file.text());
+          } catch {
+            throw new Error('That file is not a Swipio allocation file.');
+          }
+          const n = Array.isArray(snapshot.allocations) ? snapshot.allocations.length : 0;
+          const when = snapshot.savedAt ? formatDate(Date.parse(snapshot.savedAt)) : 'an unknown date';
+          const ok = await confirmDialog(
+            `The current allocation is replaced by the one in "${file.name}" (${plural(n, 'item')}, saved ${when}). The current one is kept as a version, so you can go back.`,
+            { title: 'Import this allocation?', confirmLabel: 'Import' }
+          );
+          if (!ok) return;
+          afterRestore(await api('POST', `/api/admin/collections/${id}/allocation/import`, snapshot), 'Imported');
+        })
+      );
+
+    api('GET', `/api/admin/collections/${id}/allocation/versions`)
+      .then(({ versions }) => {
+        list.replaceChildren(
+          versions.length
+            ? h(
+                'div',
+                { class: 'card' },
+                versions.map((v) =>
+                  h(
+                    'div',
+                    { class: 'item-row' },
+                    h('div', { class: 'grow' }, h('div', { class: 'name' }, formatDate(v.createdAt)), h('div', { class: 'muted small' }, `${v.label} · ${plural(v.items, 'item')}${v.by ? ` · ${v.by}` : ''}`)),
+                    h('button', {
+                      class: 'ghost icon-btn',
+                      title: 'Download',
+                      'aria-label': 'Download this version',
+                      onclick: action(async () => download(await api('GET', `/api/admin/collections/${id}/allocation/versions/${v.id}`), stampOf(v.createdAt))),
+                    }, '⬇'),
+                    h('button', {
+                      onclick: action(async () => {
+                        const ok = await confirmDialog(
+                          `The allocation goes back to how it was on ${formatDate(v.createdAt)} (${plural(v.items, 'item')}), including pickups. The current one is kept as a version, so you can go back.`,
+                          { title: 'Restore this version?', confirmLabel: 'Restore' }
+                        );
+                        if (!ok) return;
+                        afterRestore(await api('POST', `/api/admin/collections/${id}/allocation/versions/${v.id}/restore`), 'Restored');
+                      }),
+                    }, 'Restore')
+                  )
+                )
+              )
+            : h('p', { class: 'muted small' }, 'No earlier versions yet. One is saved automatically before every change you make here.')
+        );
+      })
+      .catch((err) => list.replaceChildren(h('p', { class: 'small error-text' }, err.message)));
+
+    return h(
+      'div',
+      { class: 'section' },
+      h('div', { class: 'row spread' },
+        h('h3', { style: { margin: 0 } }, 'Versions'),
+        h('div', { class: 'row' }, h('button', { onclick: exportNow }, '⬇ Export'), h('button', { onclick: importFile }, '⬆ Import'))
+      ),
+      h('p', { class: 'muted small' }, 'Before every change (handing out again, taking items away, restoring, importing) the allocation is saved here. The newest 30 are kept.'),
+      list
+    );
+  }
 
   // --- tabs ---
   const renderers = {

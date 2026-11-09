@@ -82,6 +82,120 @@ export function createApi({ now = Date.now } = {}) {
     ]);
   }
 
+  // ---------- allocation versions (export / import / restore) ----------
+
+  const VERSION_FORMAT = 'swipio-allocation';
+  const MAX_VERSIONS = 30;
+
+  /** The current allocation of a collection as a self-describing object (also the export file). */
+  async function allocationSnapshot(db, c) {
+    const [allocations, takenAway] = await Promise.all([
+      all(
+        db,
+        `SELECT a.item_id, a.user_id, a.collected_at, i.title AS item_title, u.name AS user_name, u.email AS user_email
+           FROM allocations a JOIN items i ON i.id = a.item_id JOIN users u ON u.id = a.user_id
+          WHERE i.collection_id = ? ORDER BY u.name COLLATE NOCASE, i.title COLLATE NOCASE`,
+        c.id
+      ),
+      all(
+        db,
+        `SELECT x.item_id, x.user_id, i.title AS item_title, u.email AS user_email
+           FROM allocation_exclusions x JOIN items i ON i.id = x.item_id JOIN users u ON u.id = x.user_id
+          WHERE i.collection_id = ?`,
+        c.id
+      ),
+    ]);
+    return {
+      format: VERSION_FORMAT,
+      version: 1,
+      collection: { id: c.id, name: c.name },
+      savedAt: new Date(now()).toISOString(),
+      round: c.allocation_round || 0,
+      allocations: allocations.map((a) => ({
+        itemId: a.item_id,
+        itemTitle: a.item_title,
+        userId: a.user_id,
+        userName: a.user_name,
+        userEmail: a.user_email,
+        collectedAt: a.collected_at,
+      })),
+      takenAway: takenAway.map((x) => ({ itemId: x.item_id, itemTitle: x.item_title, userId: x.user_id, userEmail: x.user_email })),
+    };
+  }
+
+  /** Stores the current allocation as a version (before an admin changes it); keeps the newest 30. */
+  async function saveVersion(db, c, label, userId) {
+    const snapshot = await allocationSnapshot(db, c);
+    await db.batch([
+      db
+        .prepare('INSERT INTO allocation_versions (collection_id, label, data, created_by, created_at) VALUES (?, ?, ?, ?, ?)')
+        .bind(c.id, label, JSON.stringify(snapshot), userId, now()),
+      db
+        .prepare(
+          `DELETE FROM allocation_versions WHERE collection_id = ?1 AND id NOT IN
+             (SELECT id FROM allocation_versions WHERE collection_id = ?1 ORDER BY created_at DESC, id DESC LIMIT ?2)`
+        )
+        .bind(c.id, MAX_VERSIONS),
+    ]);
+  }
+
+  /**
+   * Replaces the collection's allocation with a saved one. Items and people are matched by id,
+   * falling back to the item's name and the person's email (e.g. after an item was re-added).
+   * Entries that can't be matched are skipped and reported.
+   */
+  async function applySnapshot(db, c, snapshot) {
+    if (!snapshot || snapshot.format !== VERSION_FORMAT || !Array.isArray(snapshot.allocations)) {
+      throw new HttpError(400, 'This is not a Swipio allocation file');
+    }
+    if (snapshot.collection && Number(snapshot.collection.id) !== c.id) {
+      throw new HttpError(400, `This file belongs to another collection ("${snapshot.collection.name}")`);
+    }
+    const items = await all(db, 'SELECT id, title FROM items WHERE collection_id = ?', c.id);
+    const users = await all(db, 'SELECT id, email FROM users');
+    const itemIds = new Set(items.map((i) => i.id));
+    const userIds = new Set(users.map((u) => u.id));
+    const findItem = (e) => {
+      if (itemIds.has(Number(e.itemId))) return Number(e.itemId);
+      const byTitle = items.filter((i) => i.title === e.itemTitle);
+      return byTitle.length === 1 ? byTitle[0].id : null;
+    };
+    const findUser = (e) => {
+      if (userIds.has(Number(e.userId))) return Number(e.userId);
+      const email = String(e.userEmail || '').toLowerCase();
+      return users.find((u) => u.email.toLowerCase() === email)?.id ?? null;
+    };
+
+    const skipped = [];
+    const rows = new Map();
+    for (const e of snapshot.allocations) {
+      const itemId = findItem(e);
+      const userId = findUser(e);
+      if (!itemId || !userId) {
+        skipped.push({ itemTitle: e.itemTitle, userName: e.userName, reason: !itemId ? 'item no longer exists' : 'person no longer exists' });
+        continue;
+      }
+      const collectedAt = Number.isFinite(Number(e.collectedAt)) && e.collectedAt !== null ? Number(e.collectedAt) : null;
+      rows.set(`${itemId}:${userId}`, { itemId, userId, collectedAt });
+    }
+    const taken = new Map();
+    for (const x of Array.isArray(snapshot.takenAway) ? snapshot.takenAway : []) {
+      const itemId = findItem(x);
+      const userId = findUser(x);
+      if (itemId && userId) taken.set(`${itemId}:${userId}`, { itemId, userId });
+    }
+
+    const insert = db.prepare('INSERT OR IGNORE INTO allocations (item_id, user_id, collected_at) VALUES (?, ?, ?)');
+    const exclude = db.prepare('INSERT OR IGNORE INTO allocation_exclusions (item_id, user_id, created_at) VALUES (?, ?, ?)');
+    await db.batch([
+      db.prepare('DELETE FROM allocations WHERE item_id IN (SELECT id FROM items WHERE collection_id = ?)').bind(c.id),
+      db.prepare('DELETE FROM allocation_exclusions WHERE item_id IN (SELECT id FROM items WHERE collection_id = ?)').bind(c.id),
+      ...[...rows.values()].map((r) => insert.bind(r.itemId, r.userId, r.collectedAt)),
+      ...[...taken.values()].map((x) => exclude.bind(x.itemId, x.userId, now())),
+    ]);
+    return { restored: rows.size, skipped };
+  }
+
   async function finalizeDue(db) {
     const due = await all(
       db,
@@ -712,11 +826,12 @@ export function createApi({ now = Date.now } = {}) {
 
   // Admins can throw away a collection's allocation and draw a new one. Items already picked up
   // stay with their person unless keepCollected is false.
-  route('POST', '/api/admin/collections/:id/reallocate', { role: 'admin' }, async ({ db, params, body }) => {
+  route('POST', '/api/admin/collections/:id/reallocate', { role: 'admin' }, async ({ db, params, body, user }) => {
     const c = await getCollection(db, params.id);
     if (c.finalized_at === null) throw new HttpError(409, 'This collection has not been allocated yet');
     // onlyFree: everyone keeps what they have and only free units (e.g. taken away) are handed out.
     const onlyFree = body.onlyFree === true;
+    await saveVersion(db, c, onlyFree ? 'Before handing out free items' : 'Before redoing the allocation', user.id);
     const keepCollected = onlyFree || body.keepCollected !== false;
     const kept = keepCollected
       ? await all(
@@ -778,7 +893,7 @@ export function createApi({ now = Date.now } = {}) {
 
   // Admins can take allocated items away from someone. The units become free, and that person
   // is skipped for those items in later (re)allocations.
-  route('POST', '/api/admin/collections/:id/release', { role: 'admin' }, async ({ db, params, body }) => {
+  route('POST', '/api/admin/collections/:id/release', { role: 'admin' }, async ({ db, params, body, user }) => {
     const c = await getCollection(db, params.id);
     if (!Array.isArray(body.allocationIds) || !body.allocationIds.length) {
       throw new HttpError(400, 'allocationIds must be a non-empty array');
@@ -794,6 +909,7 @@ export function createApi({ now = Date.now } = {}) {
       if (!a) throw new HttpError(404, `Allocation ${id} not found in this collection`);
       rows.push(a);
     }
+    await saveVersion(db, c, rows.length === 1 ? 'Before taking an item away' : `Before taking ${rows.length} items away`, user.id);
     const exclude = db.prepare('INSERT OR IGNORE INTO allocation_exclusions (item_id, user_id, created_at) VALUES (?, ?, ?)');
     const remove = db.prepare('DELETE FROM allocations WHERE id = ?');
     await db.batch(rows.flatMap((a) => [exclude.bind(a.item_id, a.user_id, now()), remove.bind(a.id)]));
@@ -812,6 +928,66 @@ export function createApi({ now = Date.now } = {}) {
     );
     if (!r.meta.changes) throw new HttpError(404, 'Nothing to undo');
     return { ok: true };
+  });
+
+  // ---------- allocation versions ----------
+
+  async function closedCollection(db, id) {
+    const c = await getCollection(db, id);
+    if (c.finalized_at === null) throw new HttpError(409, 'This collection has not been allocated yet');
+    return c;
+  }
+
+  route('GET', '/api/admin/collections/:id/allocation', { role: 'admin' }, async ({ db, params }) => {
+    return allocationSnapshot(db, await closedCollection(db, params.id));
+  });
+
+  route('GET', '/api/admin/collections/:id/allocation/versions', { role: 'admin' }, async ({ db, params }) => {
+    const c = await getCollection(db, params.id);
+    const rows = await all(
+      db,
+      `SELECT v.id, v.label, v.created_at, v.data, u.name AS by_name
+         FROM allocation_versions v LEFT JOIN users u ON u.id = v.created_by
+        WHERE v.collection_id = ? ORDER BY v.created_at DESC, v.id DESC`,
+      c.id
+    );
+    return {
+      versions: rows.map((v) => {
+        let count = 0;
+        try {
+          count = JSON.parse(v.data).allocations.length;
+        } catch {
+          // ignore unreadable data
+        }
+        return { id: v.id, label: v.label, createdAt: v.created_at, by: v.by_name, items: count };
+      }),
+    };
+  });
+
+  route('GET', '/api/admin/collections/:id/allocation/versions/:vid', { role: 'admin' }, async ({ db, params }) => {
+    const c = await getCollection(db, params.id);
+    const v = await first(db, 'SELECT data FROM allocation_versions WHERE id = ? AND collection_id = ?', Number(params.vid), c.id);
+    if (!v) throw new HttpError(404, 'Version not found');
+    return JSON.parse(v.data);
+  });
+
+  route('POST', '/api/admin/collections/:id/allocation/versions/:vid/restore', { role: 'admin' }, async ({ db, params, user }) => {
+    const c = await closedCollection(db, params.id);
+    const v = await first(db, 'SELECT data FROM allocation_versions WHERE id = ? AND collection_id = ?', Number(params.vid), c.id);
+    if (!v) throw new HttpError(404, 'Version not found');
+    await saveVersion(db, c, 'Before restoring a version', user.id);
+    return applySnapshot(db, c, JSON.parse(v.data));
+  });
+
+  route('POST', '/api/admin/collections/:id/allocation/import', { role: 'admin' }, async ({ db, params, body, user }) => {
+    const c = await closedCollection(db, params.id);
+    // Validate before saving a version, so a wrong file changes nothing.
+    if (!body || body.format !== VERSION_FORMAT) throw new HttpError(400, 'This is not a Swipio allocation file');
+    if (body.collection && Number(body.collection.id) !== c.id) {
+      throw new HttpError(400, `This file belongs to another collection ("${body.collection.name}")`);
+    }
+    await saveVersion(db, c, 'Before importing a file', user.id);
+    return applySnapshot(db, c, body);
   });
 
   route('DELETE', '/api/admin/collections/:id', { role: 'creator' }, async (ctx) => {
