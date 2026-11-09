@@ -1143,6 +1143,7 @@ function queueItemUpload(collectionId, item) {
     title: item.title,
     quantity: item.quantity,
     description: item.description || '',
+    group: item.group || '',
     file: item.file || null,
     preview: item.file ? URL.createObjectURL(item.file) : null,
     status: 'queued',
@@ -1163,6 +1164,7 @@ function runUpload(entry) {
       fd.set('title', entry.title);
       fd.set('quantity', String(entry.quantity));
       fd.set('description', entry.description);
+      if (entry.group) fd.set('group', entry.group);
       if (entry.file) fd.set('image', await resizeImage(entry.file), 'photo.jpg');
       await api('POST', `/api/admin/collections/${entry.collectionId}/items`, fd);
       uploads.entries = uploads.entries.filter((e) => e !== entry);
@@ -1296,7 +1298,7 @@ async function viewAdminCollection(id, tab) {
           'div',
           { class: 'grow' },
           h('div', { class: 'name' }, item.title),
-          h('div', { class: 'muted small' }, `${item.quantity} available · ♥ ${item.likes} · ✕ ${item.passes}`)
+          h('div', { class: 'muted small' }, `${item.quantity} available · ♥ ${item.likes} · ✕ ${item.passes}`, item.group && ' ', item.group && h('span', { class: 'badge' }, `Group: ${item.group}`))
         ),
         h('span', { class: 'chev', 'aria-hidden': 'true' }, '›')
       );
@@ -1382,6 +1384,40 @@ async function viewAdminCollection(id, tab) {
     });
     const qty = stepper('quantity', item?.quantity || 1);
     const desc = h('textarea', { name: 'description', rows: 2, placeholder: 'Condition, size, colour… (optional)' }, item?.description || '');
+
+    // Group: items in the same group count as one product, so nobody gets more than one of them.
+    const knownGroups = [...new Set(data.items.map((i) => i.group).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+    const groupList = h('datalist', { id: 'group-options' }, knownGroups.map((g) => h('option', { value: g })));
+    const group = h('input', {
+      name: 'group',
+      list: 'group-options',
+      maxlength: 60,
+      value: item?.group || '',
+      placeholder: 'e.g. Dopper (optional)',
+      autocomplete: 'off',
+      autocapitalize: 'sentences',
+    });
+    // Suggest an existing group when the name mentions it, e.g. "Travel mug Dopper black" -> Dopper.
+    const suggestion = h('div', { class: 'row', style: { marginTop: '6px' } });
+    const drawSuggestion = () => {
+      const name = title.value.toLowerCase();
+      const match = !group.value && knownGroups.find((g) => new RegExp(`(^|\\W)${g.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(\\W|$)`).test(name));
+      suggestion.replaceChildren(
+        ...(match
+          ? [h('button', { type: 'button', class: 'chip', onclick: () => ((group.value = match), drawSuggestion()) }, `Add to group "${match}"?`)]
+          : [])
+      );
+    };
+    title.addEventListener('input', drawSuggestion);
+    group.addEventListener('input', drawSuggestion);
+    const groupField = h(
+      'label',
+      {},
+      'Max 1 per person: group',
+      group,
+      groupList,
+      h('div', { class: 'muted small', style: { fontWeight: 'normal', marginTop: '4px' } }, 'Give similar items the same group (e.g. two different Dopper mugs). Nobody gets more than one item of a group.')
+    );
     const imageUrl = h('input', { name: 'imageUrl', type: 'url', placeholder: 'https://…', value: item?.image?.startsWith('http') ? item.image : '' });
 
     const reset = () => {
@@ -1391,6 +1427,8 @@ async function viewAdminCollection(id, tab) {
       title.value = '';
       qty.querySelector('input').value = 1;
       desc.value = '';
+      group.value = '';
+      drawSuggestion();
       drawPreview();
     };
 
@@ -1399,6 +1437,7 @@ async function viewAdminCollection(id, tab) {
       fd.set('title', title.value);
       fd.set('quantity', qty.querySelector('input').value);
       fd.set('description', desc.value);
+      fd.set('group', group.value.trim());
       if (photo) fd.set('image', await resizeImage(photo), 'photo.jpg');
       else if (removeImage) fd.set('removeImage', 'true');
       else if (imageUrl.value && imageUrl.value !== item.image) fd.set('imageUrl', imageUrl.value);
@@ -1420,6 +1459,7 @@ async function viewAdminCollection(id, tab) {
             title: title.value.trim(),
             quantity: Number(qty.querySelector('input').value) || 1,
             description: desc.value.trim(),
+            group: group.value.trim(),
             file: photo || null,
           });
           const next = (e.submitter?.value || 'next') === 'next';
@@ -1432,9 +1472,10 @@ async function viewAdminCollection(id, tab) {
         },
       },
       preview,
-      h('label', {}, 'Name', title),
+      h('label', {}, 'Name', title, suggestion),
       h('div', { class: 'row spread' }, h('span', { class: 'label' }, 'How many?'), qty),
       h('label', {}, 'Description', desc),
+      groupField,
       item && data.seeChoices &&
         h('p', { class: 'small muted' }, likersOf(item.id).length ? `♥ Wanted by ${likersOf(item.id).join(', ')}` : '♥ Nobody wants this yet'),
       item &&
@@ -1854,10 +1895,11 @@ async function viewAdminCollection(id, tab) {
     // Why is an item not (fully) handed out? Explains each leftover, so it doesn't look like a mistake.
     const memberName = (userId) => data.members.find((m) => m.id === userId)?.name;
     const names = (list) => (list.length <= 3 ? list.join(', ') : `${list.slice(0, 3).join(', ')} and ${list.length - 3} more`);
-    // Same name = same product (as the allocation treats it): nobody gets two.
+    // Same group, or without one the same name = same product (as the allocation treats it).
     const productKey = (title) => String(title || '').trim().toLowerCase().replace(/\s+/g, ' ');
     const leftoverReason = (item) => {
-      const siblings = new Set(data.items.filter((i) => productKey(i.title) === productKey(item.title)).map((i) => i.id));
+      const keyOf = (i) => productKey(i.group || i.title);
+      const siblings = new Set(data.items.filter((i) => keyOf(i) === keyOf(item)).map((i) => i.id));
       const holders = new Set(data.allocations.filter((a) => siblings.has(a.itemId)).map((a) => a.userId));
       const takenFrom = new Set(data.removed.filter((x) => x.itemId === item.id).map((x) => x.userId));
       const memberLikers = data.choices.filter((c) => c.itemId === item.id && c.liked).map((c) => c.userId);

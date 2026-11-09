@@ -46,11 +46,14 @@ export function createApi({ now = Date.now } = {}) {
 
   /** Items and the likes of current members (minus items an admin took away): the input for an allocation. */
   async function allocationInput(db, collectionId) {
-    // Same name = same product, so nobody gets two of it (e.g. three separate "Dopper" items).
-    const items = (await all(db, 'SELECT id, quantity, title FROM items WHERE collection_id = ?', collectionId)).map((i) => ({
+    // Same group (or, without one, the same name) = same product, so nobody gets two of it:
+    // e.g. three separate "Dopper" items, or two different mugs both in the group "Dopper".
+    const items = (
+      await all(db, 'SELECT id, quantity, title, product_group FROM items WHERE collection_id = ?', collectionId)
+    ).map((i) => ({
       id: i.id,
       quantity: i.quantity,
-      group: productKey(i.title),
+      group: productKey(i.product_group || i.title),
     }));
     const likes = await all(
       db,
@@ -137,6 +140,7 @@ export function createApi({ now = Date.now } = {}) {
     description: i.description,
     image: i.image_id ? `/api/images/${i.image_id}` : i.image_url || null,
     quantity: i.quantity,
+    group: i.product_group || null,
   });
 
   function str(value, field, { required = false, max = 2000 } = {}) {
@@ -872,18 +876,20 @@ export function createApi({ now = Date.now } = {}) {
     const title = str(body.title, 'title', { required: true, max: 120 });
     const description = str(body.description, 'description') || '';
     const qty = quantity(body.quantity) ?? 1;
+    const group = str(body.group, 'group', { max: 60 }) || null;
     const url = imageUrl(body.imageUrl);
     const imageId = await storeImage(db, body.image);
     const item = await first(
       db,
-      `INSERT INTO items (collection_id, title, description, image_id, image_url, quantity, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING *`,
+      `INSERT INTO items (collection_id, title, description, image_id, image_url, quantity, product_group, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
       c.id,
       title,
       description,
       imageId,
       imageId ? null : url,
       qty,
+      group,
       now()
     );
     return [201, { item: serializeItem(item) }];
@@ -895,6 +901,8 @@ export function createApi({ now = Date.now } = {}) {
     const title = str(body.title, 'title', { max: 120 }) || item.title;
     const description = str(body.description, 'description') ?? item.description;
     const qty = quantity(body.quantity) ?? item.quantity;
+    // An empty group removes it; leaving the field out keeps the current one.
+    const group = body.group === undefined ? item.product_group : str(body.group, 'group', { max: 60 }) || null;
     const url = body.imageUrl ? imageUrl(body.imageUrl) : undefined;
     let imageId = item.image_id;
     let imgUrl = item.image_url;
@@ -904,12 +912,13 @@ export function createApi({ now = Date.now } = {}) {
     else if (url) [imageId, imgUrl] = [null, url];
     const updated = await first(
       db,
-      'UPDATE items SET title = ?, description = ?, quantity = ?, image_id = ?, image_url = ? WHERE id = ? RETURNING *',
+      'UPDATE items SET title = ?, description = ?, quantity = ?, image_id = ?, image_url = ?, product_group = ? WHERE id = ? RETURNING *',
       title,
       description,
       qty,
       imageId,
       imgUrl,
+      group,
       item.id
     );
     if (item.image_id && item.image_id !== imageId) await deleteImage(db, item.image_id);

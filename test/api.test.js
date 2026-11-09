@@ -204,3 +204,34 @@ test('items with the same name count as one product when allocating', async () =
   const won = (await ann('GET', `/api/collections/${cid}`)).data.items.filter((i) => i.won);
   assert.equal(won.length, 1, 'only one Dopper');
 });
+
+test('items in the same group count as one product, even with different names', async () => {
+  const srv = setup();
+  const admin = srv.client();
+  await admin('POST', '/api/setup', { name: 'Ada', email: 'ada@example.com', password: 'supersecret' });
+  const cid = (await admin('POST', '/api/admin/collections', { name: 'C', expiresAt: srv.now() + HOUR, published: true })).data.collection.id;
+  const a = (await admin('POST', `/api/admin/collections/${cid}/items`, { title: 'Dopper travel mug zwart 400 ml', group: 'Dopper' })).data.item;
+  assert.equal(a.group, 'Dopper');
+  const b = (await admin('POST', `/api/admin/collections/${cid}/items`, { title: 'Travel mug Dopper black 300 ml' })).data.item;
+  const c = (await admin('POST', `/api/admin/collections/${cid}/items`, { title: 'Facewash bar' })).data.item;
+  // Add the second mug to the group afterwards (multipart, like the app does)
+  const fd = new FormData();
+  fd.set('group', ' dopper ');
+  assert.equal((await admin('PATCH', `/api/admin/items/${b.id}`, fd)).data.item.group, 'dopper');
+  // Editing without the field keeps the group
+  assert.equal((await admin('PATCH', `/api/admin/items/${b.id}`, { quantity: 1 })).data.item.group, 'dopper');
+
+  const { data } = await admin('POST', '/api/admin/users', { name: 'Eline', email: 'eline@example.com', collectionIds: [cid] });
+  const eline = srv.client();
+  await eline('POST', `/api/invites/${data.user.inviteToken}`, { password: 'elinepassword' });
+  for (const id of [a.id, b.id, c.id]) await eline('PUT', `/api/items/${id}/swipe`, { liked: true });
+  await admin('POST', `/api/admin/collections/${cid}/close`);
+  const won = (await eline('GET', `/api/collections/${cid}`)).data.items.filter((i) => i.won).map((i) => i.title);
+  assert.equal(won.length, 2, 'one mug plus the facewash bar');
+  assert.ok(won.includes('Facewash bar'));
+
+  // Clearing the group splits them again (after a redo)
+  await admin('PATCH', `/api/admin/items/${b.id}`, { group: '' });
+  await admin('POST', `/api/admin/collections/${cid}/reallocate`, { keepCollected: false });
+  assert.equal((await eline('GET', `/api/collections/${cid}`)).data.items.filter((i) => i.won).length, 3);
+});

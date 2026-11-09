@@ -42,9 +42,11 @@ can pick up.
 ### How items are allocated
 
 When a collection closes:
-0. Items with the same name (ignoring capitals and extra spaces) count as **one product**: if
-   "Dopper" was added three times, it is handed out as one product with 3 units, and nobody gets
-   more than one. (Each person gets at most one of any product.)
+0. Items in the same **group** count as **one product**, and nobody gets more than one of it. Set
+   the group in an item's edit panel (*Max 1 per person: group*), e.g. "Dopper" for two different
+   Dopper mugs; the app suggests an existing group when the name mentions it. Items without a
+   group are grouped by name (ignoring capitals and extra spaces), so "Dopper" added three times is
+   one product with 3 units.
 1. If no more people liked an item than there are units, everyone who liked it gets one.
 2. Contested items go to the people who liked them and have been allocated the **fewest
    items so far**. Remaining ties are broken by a seeded random draw, so results are fair
