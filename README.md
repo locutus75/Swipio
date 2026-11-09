@@ -48,6 +48,8 @@ When a collection closes:
    and can be reproduced. The least contested items are handed out first.
 
 **After the allocation (Admin).** On a closed collection's Results tab an admin can:
+- See under **Not handed out** why each leftover item wasn't given to anyone (e.g. *Wanted by Kim*,
+  *Taken away from Egbert*, *Only liked by someone who no longer participates*, *Nobody wanted this*).
 - **Take items away** from someone (✕ per item, or *Take all away*). The units become free, and
   that person is skipped for those items in any later allocation. *↩ Undo* reverses this.
 - **Hand out again**, in one of two ways:

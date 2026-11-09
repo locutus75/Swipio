@@ -1780,7 +1780,7 @@ async function viewAdminCollection(id, tab) {
       const message = `${what} available for others, and ${name} won't get ${allocations.length === 1 ? 'it' : 'them'} back in a new allocation. You can undo this.`;
       if (!(await confirmDialog(message, { title, confirmLabel: 'Take away', danger: true }))) return;
       await api('POST', `/api/admin/collections/${id}/release`, { allocationIds: allocations.map((a) => a.id) });
-      toast('Taken away. Tap "Hand out again" to give it to someone else.');
+      toast('Taken away. Use "Hand out free items" below to give it to someone else.');
       reopen('results');
     });
 
@@ -1796,6 +1796,28 @@ async function viewAdminCollection(id, tab) {
     const allocatedCount = new Map();
     data.allocations.forEach((a) => allocatedCount.set(a.itemId, (allocatedCount.get(a.itemId) || 0) + 1));
     const leftovers = data.items.map((i) => ({ ...i, left: i.quantity - (allocatedCount.get(i.id) || 0) })).filter((i) => i.left > 0);
+
+    // Why is an item not (fully) handed out? Explains each leftover, so it doesn't look like a mistake.
+    const memberName = (userId) => data.members.find((m) => m.id === userId)?.name;
+    const names = (list) => (list.length <= 3 ? list.join(', ') : `${list.slice(0, 3).join(', ')} and ${list.length - 3} more`);
+    const leftoverReason = (item) => {
+      const holders = new Set(data.allocations.filter((a) => a.itemId === item.id).map((a) => a.userId));
+      const takenFrom = new Set(data.removed.filter((x) => x.itemId === item.id).map((x) => x.userId));
+      const memberLikers = data.choices.filter((c) => c.itemId === item.id && c.liked).map((c) => c.userId);
+      const eligible = memberLikers.filter((u) => !holders.has(u) && !takenFrom.has(u)).map(memberName).filter(Boolean);
+      const formerLikes = item.likes - memberLikers.length; // likes from people no longer participating
+      if (eligible.length) return { canHandOut: true, text: `Wanted by ${names(eligible)}. Tap "Hand out free items".` };
+      const former = formerLikes > 0 ? `${plural(formerLikes, 'person', 'people')} who no longer participate${formerLikes === 1 ? 's' : ''}` : '';
+      const takenNames = names([...takenFrom].map((u) => data.removed.find((x) => x.userId === u)?.userName).filter(Boolean));
+      let text;
+      if (takenFrom.size) text = `Taken away from ${takenNames}${former ? `; also liked by ${former}` : ''}. Nobody else wants it.`;
+      else if (former) text = `Only liked by ${former}.`;
+      else if (holders.size) text = 'Everyone who wanted it already has one.';
+      else text = 'Nobody wanted this.';
+      return { canHandOut: false, text };
+    };
+    const explained = leftovers.map((i) => ({ ...i, reason: leftoverReason(i) }));
+    const anythingToHandOut = explained.some((i) => i.reason.canHandOut);
     const summary = () =>
       `${plural(data.allocations.length, 'item')} allocated · ${data.allocations.filter((a) => a.collected).length} collected. Tick items off as people pick them up.`;
     const counter = h('p', { class: 'muted' }, summary());
@@ -1876,15 +1898,27 @@ async function viewAdminCollection(id, tab) {
             )
           )
         : h('div', { class: 'card empty' }, 'Nobody wanted anything in this collection.'),
-      leftovers.length > 0 &&
+      explained.length > 0 &&
         h(
           'div',
           { class: 'section' },
           h('div', { class: 'row spread' },
-            h('h3', { style: { margin: 0 } }, 'Unclaimed'),
-            isAdmin && data.removed.length > 0 && h('button', { class: 'primary', onclick: () => openReallocateSheet({ onlyFree: true }) }, 'Hand out free items')
+            h('h3', { style: { margin: 0 } }, 'Not handed out'),
+            isAdmin && anythingToHandOut && h('button', { class: 'primary', onclick: () => openReallocateSheet({ onlyFree: true }) }, 'Hand out free items')
           ),
-          h('div', { class: 'card', style: { marginTop: '8px' } }, leftovers.map((i) => h('div', { class: 'item-row' }, thumb(i), h('div', { class: 'grow name' }, i.title), h('span', { class: 'muted small' }, `${i.left} left`))))
+          h(
+            'div',
+            { class: 'card', style: { marginTop: '8px' } },
+            explained.map((i) =>
+              h(
+                'div',
+                { class: 'item-row' },
+                thumb(i),
+                h('div', { class: 'grow' }, h('div', { class: 'name' }, i.title), h('div', { class: i.reason.canHandOut ? 'small' : 'muted small' }, i.reason.text)),
+                h('span', { class: i.reason.canHandOut ? 'badge hot' : 'muted small' }, `${i.left} left`)
+              )
+            )
+          )
         )
     );
   };
