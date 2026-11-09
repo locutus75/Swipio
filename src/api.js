@@ -3,10 +3,13 @@
 // Auth uses bearer tokens (Authorization: Bearer ...) rather than cookies, because the frontend
 // lives on GitHub Pages and the API on workers.dev, two different sites.
 //
-// Roles: participant (swipes), creator (+ makes and runs their own collections), manager (+ sees
-// every collection, who chose what, and manages users), admin (+ manages admins).
+// Anyone can sign up. Every user can create collections and invite people; a collection is
+// visible only to its owner, its co-managers (editors) and the people invited to it. Owners have
+// full control over their own collections. Admins manage the platform and can see everything.
 //
-// Vars (see wrangler.toml): ALLOWED_ORIGINS, PASSWORD_ITERATIONS. Binding: DB (D1).
+// Vars (see wrangler.toml): ALLOWED_ORIGINS, PASSWORD_ITERATIONS, SIGNUPS_PER_HOUR.
+// Secret (optional): TURNSTILE_SECRET enables Cloudflare Turnstile bot protection on sign-up.
+// Binding: DB (D1).
 
 import { allocate, productKey } from './allocation.js';
 import * as auth from './auth.js';
@@ -18,10 +21,10 @@ class HttpError extends Error {
   }
 }
 
-// participant < creator < manager < admin: each role can do everything the roles below it can.
-export const ROLES = ['participant', 'creator', 'manager', 'admin'];
-const rank = (role) => ROLES.indexOf(role);
-const atLeast = (user, role) => rank(user.access_role) >= rank(role);
+// 'creator' is a regular user; 'admin' manages the platform. (The database also allows the old
+// 'participant' and 'manager' values, which migration 0008 converted to 'creator'.)
+export const ROLES = ['creator', 'admin'];
+const isAdmin = (user) => user.access_role === 'admin';
 
 const MAX_IMAGE_BYTES = 1.5 * 1024 * 1024;
 const IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/avif'];
@@ -221,6 +224,7 @@ export function createApi({ now = Date.now } = {}) {
       status: pending ? 'invited' : 'active',
       inviteToken: pending ? u.invite_token : null,
       inviteExpiresAt: pending ? u.invite_expires_at : null,
+      blocked: !!u.blocked_at,
       createdAt: u.created_at,
     };
   }
@@ -335,21 +339,29 @@ export function createApi({ now = Date.now } = {}) {
     return c;
   }
 
-  /**
-   * Returns the collection if the current user may manage it: managers and admins all of them,
-   * creators the ones they made or were made an editor of. Deleting is for the maker and managers+.
-   */
-  async function managedCollection(ctx, id, { toDelete = false } = {}) {
-    const c = await getCollection(ctx.db, id);
-    if (atLeast(ctx.user, 'manager') || c.created_by === ctx.user.id) return c;
+  /** How the current user relates to a collection: 'admin', 'owner', 'editor' or null. */
+  async function accessTo(ctx, c) {
+    if (isAdmin(ctx.user)) return 'admin';
+    if (c.created_by === ctx.user.id) return 'owner';
     const editor = await first(
       ctx.db,
       'SELECT 1 AS ok FROM collection_editors WHERE collection_id = ? AND user_id = ?',
       c.id,
       ctx.user.id
     );
-    if (!editor) throw new HttpError(404, 'Collection not found');
-    if (toDelete) throw new HttpError(403, 'Only the person who made this collection or a manager can delete it');
+    return editor ? 'editor' : null;
+  }
+
+  /**
+   * Returns the collection if the current user may manage it: its owner, its editors and admins.
+   * `ownerOnly` actions (delete, reopen, choosing editors) are for the owner and admins.
+   */
+  async function managedCollection(ctx, id, { ownerOnly = false } = {}) {
+    const c = await getCollection(ctx.db, id);
+    const access = await accessTo(ctx, c);
+    if (!access) throw new HttpError(404, 'Collection not found');
+    if (ownerOnly && access === 'editor') throw new HttpError(403, 'Only the owner of this collection can do this');
+    ctx.access = access;
     return c;
   }
 
@@ -359,8 +371,8 @@ export function createApi({ now = Date.now } = {}) {
     return item;
   }
 
-  /** Reopening a closed collection is for admins and the person who made it. */
-  const canReopen = (user, c) => atLeast(user, 'admin') || c.created_by === user.id;
+  /** Reopening a closed collection is for admins and its owner. */
+  const canReopen = (user, c) => isAdmin(user) || c.created_by === user.id;
 
   /**
    * Statements that reopen a closed collection: the allocation is set aside (a version is saved
@@ -368,7 +380,7 @@ export function createApi({ now = Date.now } = {}) {
    */
   async function reopenStatements(ctx, c) {
     if (!canReopen(ctx.user, c)) {
-      throw new HttpError(403, 'Only an admin or the person who made this collection can reopen it');
+      throw new HttpError(403, 'Only the owner of this collection can reopen it');
     }
     await saveVersion(ctx.db, c, 'Before reopening', ctx.user.id);
     return [
@@ -379,17 +391,31 @@ export function createApi({ now = Date.now } = {}) {
 
   function parseRole(value, fallback) {
     if (value === undefined || value === null || value === '') return fallback;
-    if (value === 'user') return 'participant'; // older clients
-    if (!ROLES.includes(value)) throw new HttpError(400, `role must be one of: ${ROLES.join(', ')}`);
-    return value;
+    if (value === 'admin') return 'admin';
+    if (['creator', 'user', 'participant', 'manager'].includes(value)) return 'creator'; // older clients
+    throw new HttpError(400, 'role must be "creator" or "admin"');
   }
 
-  /** Users can only manage people with a role up to their own, and only hand out roles up to their own. */
-  function assertCanManage(ctx, target, newRole = target.access_role) {
-    if (rank(target.access_role) > rank(ctx.user.access_role) || rank(newRole) > rank(ctx.user.access_role)) {
-      throw new HttpError(403, 'You cannot manage users with a higher role than your own');
-    }
+  /**
+   * People the current user may see: admins see everyone; others see people they invited and
+   * the participants of collections they manage.
+   */
+  async function knownUsers(ctx) {
+    if (isAdmin(ctx.user)) return all(ctx.db, 'SELECT * FROM users ORDER BY name COLLATE NOCASE');
+    return all(
+      ctx.db,
+      `SELECT u.* FROM users u
+        WHERE u.id = ?1 OR u.invited_by = ?1 OR u.id IN (
+          SELECT m.user_id FROM collection_members m JOIN collections c ON c.id = m.collection_id
+           WHERE c.created_by = ?1
+              OR EXISTS (SELECT 1 FROM collection_editors e WHERE e.collection_id = c.id AND e.user_id = ?1))
+        ORDER BY u.name COLLATE NOCASE`,
+      ctx.user.id
+    );
   }
+
+  /** An invite link is only shown to admins and to whoever sent the invite. */
+  const mayShareInvite = (ctx, u) => isAdmin(ctx.user) || u.invited_by === ctx.user.id;
 
   /** Reads a JSON or multipart body into a plain object (files stay File objects). */
   async function readBody(req) {
@@ -458,7 +484,48 @@ export function createApi({ now = Date.now } = {}) {
     if (!user || !(await auth.verifyPassword(String(body.password || ''), user.password_hash))) {
       throw new HttpError(401, 'Invalid email or password');
     }
+    if (user.blocked_at) throw new HttpError(403, 'This account has been blocked');
     return { user: publicUser(user), token: await startSession(db, user.id) };
+  });
+
+  /** Checks a Cloudflare Turnstile token when TURNSTILE_SECRET is configured (bot protection). */
+  async function verifyTurnstile(env, token, request) {
+    if (!env.TURNSTILE_SECRET) return;
+    if (!token) throw new HttpError(400, 'Please complete the "are you human" check');
+    const form = new FormData();
+    form.set('secret', env.TURNSTILE_SECRET);
+    form.set('response', String(token));
+    const ip = request.headers.get('CF-Connecting-IP');
+    if (ip) form.set('remoteip', ip);
+    const res = await globalThis.fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', { method: 'POST', body: form });
+    const out = await res.json().catch(() => ({}));
+    if (!out.success) throw new HttpError(400, 'The "are you human" check failed. Please try again.');
+  }
+
+  // Anyone can create an account and start making collections.
+  route('POST', '/api/signup', async ({ db, body, env, req }) => {
+    const name = str(body.name, 'name', { required: true, max: 100 });
+    const email = str(body.email, 'email', { required: true, max: 200 }).toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new HttpError(400, 'Please enter a valid email address');
+    await verifyTurnstile(env, body.turnstileToken, req);
+    // A simple brake on mass sign-ups.
+    const limit = Number(env.SIGNUPS_PER_HOUR) || 30;
+    const recent = await first(db, 'SELECT COUNT(*) AS n FROM users WHERE invited_by IS NULL AND created_at > ?', now() - 3600_000);
+    if (recent.n >= limit) throw new HttpError(429, 'Too many new accounts right now. Please try again later.');
+    if (await first(db, 'SELECT 1 AS ok FROM users WHERE email = ?', email)) {
+      throw new HttpError(409, 'There is already an account with this email. Log in, or use the invite link you received.');
+    }
+    const hash = await password(body.password, env);
+    const user = await first(
+      db,
+      `INSERT INTO users (name, email, role, access_role, password_hash, created_at)
+       VALUES (?, ?, 'user', 'creator', ?, ?) RETURNING *`,
+      name,
+      email,
+      hash,
+      now()
+    );
+    return [201, { user: publicUser(user), token: await startSession(db, user.id) }];
   });
 
   route('POST', '/api/logout', async ({ db, tokenHash }) => {
@@ -595,72 +662,77 @@ export function createApi({ now = Date.now } = {}) {
 
   // ---------- admin: users ----------
 
-  // Creators get the list too (to pick participants), but without invite links.
-  route('GET', '/api/admin/users', { role: 'creator' }, async (ctx) => {
-    const users = await all(ctx.db, 'SELECT * FROM users ORDER BY name COLLATE NOCASE');
-    const full = atLeast(ctx.user, 'manager');
-    return {
-      users: users.map((u) => {
-        const out = adminUser(u);
-        return full ? out : { ...out, inviteToken: null, inviteExpiresAt: null };
-      }),
-    };
+  /** A user as seen by the current user: invite links only for admins and whoever sent the invite. */
+  const userFor = (ctx, u) => {
+    const out = adminUser(u);
+    return mayShareInvite(ctx, u) ? out : { ...out, inviteToken: null, inviteExpiresAt: null };
+  };
+
+  // Admins see everyone; others see the people they invited or share a collection with
+  // (to pick participants), and nobody else.
+  route('GET', '/api/admin/users', { auth: true }, async (ctx) => {
+    return { users: (await knownUsers(ctx)).map((u) => userFor(ctx, u)) };
   });
 
-  route('POST', '/api/admin/users', { role: 'manager' }, async (ctx) => {
+  // Invite someone by email into one or more collections you manage. If they already have an
+  // account they are simply added; otherwise they get an invite link to set a password.
+  route('POST', '/api/admin/users', { auth: true }, async (ctx) => {
     const { db, body } = ctx;
     const name = str(body.name, 'name', { required: true, max: 100 });
     const email = str(body.email, 'email', { required: true, max: 200 }).toLowerCase();
     if (!/^[^\s@]+@[^\s@]+$/.test(email)) throw new HttpError(400, 'email is not valid');
-    const role = parseRole(body.role, 'participant');
-    assertCanManage(ctx, { access_role: 'participant' }, role);
+    const role = isAdmin(ctx.user) ? parseRole(body.role, 'creator') : 'creator';
     const collectionIds = Array.isArray(body.collectionIds) ? [...new Set(body.collectionIds.map(Number))] : [];
-    for (const cid of collectionIds) await getCollection(db, cid);
-    if (await first(db, 'SELECT 1 AS ok FROM users WHERE email = ?', email)) {
-      throw new HttpError(409, 'A user with this email already exists');
+    if (!isAdmin(ctx.user) && !collectionIds.length) throw new HttpError(400, 'Invite people from one of your collections');
+    for (const cid of collectionIds) await managedCollection(ctx, cid);
+    const add = db.prepare('INSERT OR IGNORE INTO collection_members (collection_id, user_id) VALUES (?, ?)');
+
+    const existing = await first(db, 'SELECT * FROM users WHERE email = ?', email);
+    if (existing) {
+      if (!collectionIds.length) throw new HttpError(409, 'A user with this email already exists');
+      await db.batch(collectionIds.map((cid) => add.bind(cid, existing.id)));
+      return [200, { user: userFor(ctx, existing), existing: true }];
     }
     const user = await first(
       db,
-      `INSERT INTO users (name, email, role, access_role, invite_token, invite_expires_at, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING *`,
+      `INSERT INTO users (name, email, role, access_role, invite_token, invite_expires_at, invited_by, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
       name,
       email,
       role === 'admin' ? 'admin' : 'user',
       role,
       auth.randomToken(),
       now() + auth.INVITE_TTL,
+      ctx.user.id,
       now()
     );
-    if (collectionIds.length) {
-      const add = db.prepare('INSERT OR IGNORE INTO collection_members (collection_id, user_id) VALUES (?, ?)');
-      await db.batch(collectionIds.map((cid) => add.bind(cid, user.id)));
-    }
-    return [201, { user: adminUser(user) }];
+    if (collectionIds.length) await db.batch(collectionIds.map((cid) => add.bind(cid, user.id)));
+    return [201, { user: userFor(ctx, user), existing: false }];
   });
 
-  route('PATCH', '/api/admin/users/:id', { role: 'manager' }, async (ctx) => {
+  // Platform management: admins only.
+  route('PATCH', '/api/admin/users/:id', { role: 'admin' }, async (ctx) => {
     const user = await getUser(ctx.db, ctx.params.id);
     const name = str(ctx.body.name, 'name', { max: 100 }) || user.name;
     const role = parseRole(ctx.body.role, user.access_role);
-    if (user.id === ctx.user.id && role !== user.access_role) {
-      throw new HttpError(400, 'You cannot change your own role');
+    const blocked = ctx.body.blocked === undefined ? !!user.blocked_at : !!ctx.body.blocked;
+    if (user.id === ctx.user.id && (role !== user.access_role || blocked)) {
+      throw new HttpError(400, 'You cannot change your own role or block yourself');
     }
-    assertCanManage(ctx, user, role);
-    await run(
-      ctx.db,
-      'UPDATE users SET name = ?, role = ?, access_role = ? WHERE id = ?',
-      name,
-      role === 'admin' ? 'admin' : 'user',
-      role,
-      user.id
-    );
-    return { user: adminUser({ ...user, name, access_role: role }) };
+    const blockedAt = blocked ? user.blocked_at || now() : null;
+    const stmts = [
+      ctx.db
+        .prepare('UPDATE users SET name = ?, role = ?, access_role = ?, blocked_at = ? WHERE id = ?')
+        .bind(name, role === 'admin' ? 'admin' : 'user', role, blockedAt, user.id),
+    ];
+    if (blocked) stmts.push(ctx.db.prepare('DELETE FROM sessions WHERE user_id = ?').bind(user.id)); // sign out everywhere
+    await ctx.db.batch(stmts);
+    return { user: adminUser({ ...user, name, access_role: role, blocked_at: blockedAt }) };
   });
 
-  route('POST', '/api/admin/users/:id/invite', { role: 'manager' }, async (ctx) => {
+  route('POST', '/api/admin/users/:id/invite', { role: 'admin' }, async (ctx) => {
     const user = await getUser(ctx.db, ctx.params.id);
     if (user.id === ctx.user.id) throw new HttpError(400, 'You cannot reset your own password here');
-    assertCanManage(ctx, user);
     const token = auth.randomToken();
     const expires = now() + auth.INVITE_TTL;
     // Re-inviting an active user acts as a password reset and signs them out everywhere.
@@ -675,18 +747,17 @@ export function createApi({ now = Date.now } = {}) {
     };
   });
 
-  route('DELETE', '/api/admin/users/:id', { role: 'manager' }, async (ctx) => {
+  route('DELETE', '/api/admin/users/:id', { role: 'admin' }, async (ctx) => {
     const user = await getUser(ctx.db, ctx.params.id);
     if (user.id === ctx.user.id) throw new HttpError(400, 'You cannot delete yourself');
-    assertCanManage(ctx, user);
     await run(ctx.db, 'DELETE FROM users WHERE id = ?', user.id);
     return { ok: true };
   });
 
   // ---------- admin: collections ----------
 
-  // Managers and admins see every collection; creators only the ones they made.
-  route('GET', '/api/admin/collections', { role: 'creator' }, async ({ db, user }) => {
+  // Collections you manage: the ones you made and the ones shared with you. Admins see all.
+  route('GET', '/api/admin/collections', { auth: true }, async ({ db, user }) => {
     const rows = await all(
       db,
       `SELECT c.*, u.name AS creator_name,
@@ -696,7 +767,7 @@ export function createApi({ now = Date.now } = {}) {
         WHERE ?1 OR c.created_by = ?2
            OR EXISTS (SELECT 1 FROM collection_editors e WHERE e.collection_id = c.id AND e.user_id = ?2)
         ORDER BY c.created_at DESC`,
-      atLeast(user, 'manager') ? 1 : 0,
+      isAdmin(user) ? 1 : 0,
       user.id
     );
     return {
@@ -705,12 +776,13 @@ export function createApi({ now = Date.now } = {}) {
         itemCount: c.item_count,
         memberCount: c.member_count,
         createdBy: c.created_by ? { id: c.created_by, name: c.creator_name } : null,
-        sharedWithMe: !atLeast(user, 'manager') && c.created_by !== user.id,
+        mine: c.created_by === user.id,
+        sharedWithMe: !isAdmin(user) && c.created_by !== user.id,
       })),
     };
   });
 
-  route('POST', '/api/admin/collections', { role: 'creator' }, async ({ db, body, user }) => {
+  route('POST', '/api/admin/collections', { auth: true }, async ({ db, body, user }) => {
     const name = str(body.name, 'name', { required: true, max: 120 });
     const description = str(body.description, 'description') || '';
     const expiresAt = timestamp(body.expiresAt, 'expiresAt');
@@ -728,11 +800,12 @@ export function createApi({ now = Date.now } = {}) {
     return [201, { collection: serializeCollection(c) }];
   });
 
-  // Creators see totals (likes per item, how far people are); "who chose what" is for managers+.
-  route('GET', '/api/admin/collections/:id', { role: 'creator' }, async (ctx) => {
+  // Everything about a collection for the people who manage it (owner, editors, admins).
+  route('GET', '/api/admin/collections/:id', { auth: true }, async (ctx) => {
     const { db } = ctx;
     const c = await managedCollection(ctx, ctx.params.id);
-    const seeChoices = atLeast(ctx.user, 'manager');
+    const seeChoices = true; // owners and co-managers see who chose what
+    const ownerRights = ctx.access !== 'editor';
     const [items, members, allocations, swipes, editors, creator, exclusions] = await Promise.all([
       all(
         db,
@@ -796,13 +869,12 @@ export function createApi({ now = Date.now } = {}) {
       allocationRound: c.allocation_round || 0,
       canReopen: canReopen(ctx.user, c),
       removed: exclusions.map((x) => ({ userId: x.user_id, userName: x.user_name, itemId: x.item_id, itemTitle: x.item_title })),
-      canDelete: seeChoices || c.created_by === ctx.user.id,
-      canManageEditors: seeChoices,
+      access: ctx.access,
+      canAllocate: true,
+      canDelete: ownerRights,
+      canManageEditors: ownerRights,
       items: items.map((i) => ({ ...serializeItem(i), likes: i.likes, passes: i.passes, allocated: i.allocated })),
-      members: members.map((u) => {
-        const m = { ...adminUser(u), swiped: u.swiped };
-        return seeChoices ? m : { ...m, inviteToken: null, inviteExpiresAt: null };
-      }),
+      members: members.map((u) => ({ ...userFor(ctx, u), swiped: u.swiped })),
       choices: swipes.map((s) => ({ userId: s.user_id, itemId: s.item_id, liked: !!s.liked })),
       allocations: (seeChoices ? allocations : []).map((a) => ({
         id: a.id,
@@ -816,7 +888,7 @@ export function createApi({ now = Date.now } = {}) {
     };
   });
 
-  route('PATCH', '/api/admin/collections/:id', { role: 'creator' }, async (ctx) => {
+  route('PATCH', '/api/admin/collections/:id', { auth: true }, async (ctx) => {
     const { db, body } = ctx;
     const c = await managedCollection(ctx, ctx.params.id);
     const name = str(body.name, 'name', { max: 120 }) || c.name;
@@ -840,7 +912,7 @@ export function createApi({ now = Date.now } = {}) {
     return { collection: serializeCollection(await getCollection(db, c.id)) };
   });
 
-  route('POST', '/api/admin/collections/:id/reopen', { role: 'creator' }, async (ctx) => {
+  route('POST', '/api/admin/collections/:id/reopen', { auth: true }, async (ctx) => {
     const { db, body } = ctx;
     const c = await managedCollection(ctx, ctx.params.id);
     if (c.finalized_at === null) throw new HttpError(409, 'This collection is not closed');
@@ -853,7 +925,7 @@ export function createApi({ now = Date.now } = {}) {
     return { collection: serializeCollection(await getCollection(db, c.id)) };
   });
 
-  route('POST', '/api/admin/collections/:id/close', { role: 'creator' }, async (ctx) => {
+  route('POST', '/api/admin/collections/:id/close', { auth: true }, async (ctx) => {
     const { db } = ctx;
     const c = await managedCollection(ctx, ctx.params.id);
     if (!c.published) throw new HttpError(409, 'Publish the collection before closing it');
@@ -864,8 +936,9 @@ export function createApi({ now = Date.now } = {}) {
 
   // Admins can throw away a collection's allocation and draw a new one. Items already picked up
   // stay with their person unless keepCollected is false.
-  route('POST', '/api/admin/collections/:id/reallocate', { role: 'admin' }, async ({ db, params, body, user }) => {
-    const c = await getCollection(db, params.id);
+  route('POST', '/api/admin/collections/:id/reallocate', { auth: true }, async (ctx) => {
+    const { db, params, body, user } = ctx;
+    const c = await managedCollection(ctx, params.id);
     if (c.finalized_at === null) throw new HttpError(409, 'This collection has not been allocated yet');
     // onlyFree: everyone keeps what they have and only free units (e.g. taken away) are handed out.
     const onlyFree = body.onlyFree === true;
@@ -903,8 +976,9 @@ export function createApi({ now = Date.now } = {}) {
   });
 
   // Admins can change a participant's choices, also after closing. A new hand-out uses them.
-  route('PUT', '/api/admin/collections/:id/choices', { role: 'admin' }, async ({ db, params, body }) => {
-    const c = await getCollection(db, params.id);
+  route('PUT', '/api/admin/collections/:id/choices', { auth: true }, async (ctx) => {
+    const { db, params, body } = ctx;
+    const c = await managedCollection(ctx, params.id);
     const userId = Number(body.userId);
     const itemId = Number(body.itemId);
     const item = await first(db, 'SELECT id FROM items WHERE id = ? AND collection_id = ?', itemId, c.id);
@@ -931,8 +1005,9 @@ export function createApi({ now = Date.now } = {}) {
 
   // Admins can take allocated items away from someone. The units become free, and that person
   // is skipped for those items in later (re)allocations.
-  route('POST', '/api/admin/collections/:id/release', { role: 'admin' }, async ({ db, params, body, user }) => {
-    const c = await getCollection(db, params.id);
+  route('POST', '/api/admin/collections/:id/release', { auth: true }, async (ctx) => {
+    const { db, params, body, user } = ctx;
+    const c = await managedCollection(ctx, params.id);
     if (!Array.isArray(body.allocationIds) || !body.allocationIds.length) {
       throw new HttpError(400, 'allocationIds must be a non-empty array');
     }
@@ -955,8 +1030,9 @@ export function createApi({ now = Date.now } = {}) {
   });
 
   // Undo a take-away: the person may get the item again in a later (re)allocation.
-  route('POST', '/api/admin/collections/:id/unrelease', { role: 'admin' }, async ({ db, params, body }) => {
-    const c = await getCollection(db, params.id);
+  route('POST', '/api/admin/collections/:id/unrelease', { auth: true }, async (ctx) => {
+    const { db, params, body } = ctx;
+    const c = await managedCollection(ctx, params.id);
     const r = await run(
       db,
       'DELETE FROM allocation_exclusions WHERE user_id = ? AND item_id IN (SELECT id FROM items WHERE id = ? AND collection_id = ?)',
@@ -970,18 +1046,19 @@ export function createApi({ now = Date.now } = {}) {
 
   // ---------- allocation versions ----------
 
-  async function closedCollection(db, id) {
-    const c = await getCollection(db, id);
+  async function closedCollection(ctx, id) {
+    const c = await managedCollection(ctx, id);
     if (c.finalized_at === null) throw new HttpError(409, 'This collection has not been allocated yet');
     return c;
   }
 
-  route('GET', '/api/admin/collections/:id/allocation', { role: 'admin' }, async ({ db, params }) => {
-    return allocationSnapshot(db, await closedCollection(db, params.id));
+  route('GET', '/api/admin/collections/:id/allocation', { auth: true }, async (ctx) => {
+    return allocationSnapshot(ctx.db, await closedCollection(ctx, ctx.params.id));
   });
 
-  route('GET', '/api/admin/collections/:id/allocation/versions', { role: 'admin' }, async ({ db, params }) => {
-    const c = await getCollection(db, params.id);
+  route('GET', '/api/admin/collections/:id/allocation/versions', { auth: true }, async (ctx) => {
+    const { db, params } = ctx;
+    const c = await managedCollection(ctx, params.id);
     const rows = await all(
       db,
       `SELECT v.id, v.label, v.created_at, v.data, u.name AS by_name
@@ -1002,15 +1079,17 @@ export function createApi({ now = Date.now } = {}) {
     };
   });
 
-  route('GET', '/api/admin/collections/:id/allocation/versions/:vid', { role: 'admin' }, async ({ db, params }) => {
-    const c = await getCollection(db, params.id);
+  route('GET', '/api/admin/collections/:id/allocation/versions/:vid', { auth: true }, async (ctx) => {
+    const { db, params } = ctx;
+    const c = await managedCollection(ctx, params.id);
     const v = await first(db, 'SELECT data FROM allocation_versions WHERE id = ? AND collection_id = ?', Number(params.vid), c.id);
     if (!v) throw new HttpError(404, 'Version not found');
     return JSON.parse(v.data);
   });
 
-  route('POST', '/api/admin/collections/:id/allocation/versions/:vid/restore', { role: 'admin' }, async ({ db, params, user }) => {
-    const c = await closedCollection(db, params.id);
+  route('POST', '/api/admin/collections/:id/allocation/versions/:vid/restore', { auth: true }, async (ctx) => {
+    const { db, params, user } = ctx;
+    const c = await closedCollection(ctx, params.id);
     const v = await first(db, 'SELECT data FROM allocation_versions WHERE id = ? AND collection_id = ?', Number(params.vid), c.id);
     if (!v) throw new HttpError(404, 'Version not found');
     await saveVersion(db, c, 'Before restoring a version', user.id);
@@ -1018,16 +1097,18 @@ export function createApi({ now = Date.now } = {}) {
   });
 
   // Removes the whole allocation (who gets what, pickups and take-aways). A version is saved first.
-  route('POST', '/api/admin/collections/:id/allocation/reset', { role: 'admin' }, async ({ db, params, user }) => {
-    const c = await closedCollection(db, params.id);
+  route('POST', '/api/admin/collections/:id/allocation/reset', { auth: true }, async (ctx) => {
+    const { db, params, user } = ctx;
+    const c = await closedCollection(ctx, params.id);
     await saveVersion(db, c, 'Before reset', user.id);
     const r = await run(db, 'DELETE FROM allocations WHERE item_id IN (SELECT id FROM items WHERE collection_id = ?)', c.id);
     await run(db, 'DELETE FROM allocation_exclusions WHERE item_id IN (SELECT id FROM items WHERE collection_id = ?)', c.id);
     return { ok: true, removed: r.meta.changes };
   });
 
-  route('POST', '/api/admin/collections/:id/allocation/import', { role: 'admin' }, async ({ db, params, body, user }) => {
-    const c = await closedCollection(db, params.id);
+  route('POST', '/api/admin/collections/:id/allocation/import', { auth: true }, async (ctx) => {
+    const { db, params, body, user } = ctx;
+    const c = await closedCollection(ctx, params.id);
     // Validate before saving a version, so a wrong file changes nothing.
     if (!body || body.format !== VERSION_FORMAT) throw new HttpError(400, 'This is not a Swipio allocation file');
     if (body.collection && Number(body.collection.id) !== c.id) {
@@ -1037,9 +1118,9 @@ export function createApi({ now = Date.now } = {}) {
     return applySnapshot(db, c, body);
   });
 
-  route('DELETE', '/api/admin/collections/:id', { role: 'creator' }, async (ctx) => {
+  route('DELETE', '/api/admin/collections/:id', { auth: true }, async (ctx) => {
     const { db } = ctx;
-    const c = await managedCollection(ctx, ctx.params.id, { toDelete: true });
+    const c = await managedCollection(ctx, ctx.params.id, { ownerOnly: true });
     await db.batch([
       db
         .prepare('DELETE FROM images WHERE id IN (SELECT image_id FROM items WHERE collection_id = ? AND image_id IS NOT NULL)')
@@ -1049,7 +1130,7 @@ export function createApi({ now = Date.now } = {}) {
     return { ok: true };
   });
 
-  route('PUT', '/api/admin/collections/:id/members', { role: 'creator' }, async (ctx) => {
+  route('PUT', '/api/admin/collections/:id/members', { auth: true }, async (ctx) => {
     const { db, body } = ctx;
     const c = await managedCollection(ctx, ctx.params.id);
     if (!Array.isArray(body.userIds)) throw new HttpError(400, 'userIds must be an array');
@@ -1065,23 +1146,15 @@ export function createApi({ now = Date.now } = {}) {
     return { ok: true, userIds: ids };
   });
 
-  // Managers and admins choose which creators may also manage this collection.
-  route('PUT', '/api/admin/collections/:id/editors', { role: 'manager' }, async (ctx) => {
+  // The owner (or an admin) chooses which participants may co-manage this collection.
+  route('PUT', '/api/admin/collections/:id/editors', { auth: true }, async (ctx) => {
     const { db, body } = ctx;
-    const c = await getCollection(db, ctx.params.id);
+    const c = await managedCollection(ctx, ctx.params.id, { ownerOnly: true });
     if (!Array.isArray(body.userIds)) throw new HttpError(400, 'userIds must be an array');
     const ids = [...new Set(body.userIds.map(Number))].filter((id) => id !== c.created_by);
     for (const id of ids) {
-      const u = await first(db, 'SELECT name, access_role FROM users WHERE id = ?', id);
-      if (!u) throw new HttpError(400, `Unknown user ${id}`);
-      if (u.access_role !== 'creator') {
-        throw new HttpError(
-          400,
-          u.access_role === 'participant'
-            ? `${u.name} is a participant. Give them the Creator role first.`
-            : `${u.name} can already manage every collection.`
-        );
-      }
+      const member = await first(db, 'SELECT 1 AS ok FROM collection_members WHERE collection_id = ? AND user_id = ?', c.id, id);
+      if (!member) throw new HttpError(400, 'Only participants of this collection can be made co-managers');
     }
     const add = db.prepare('INSERT INTO collection_editors (collection_id, user_id) VALUES (?, ?)');
     await db.batch([
@@ -1093,7 +1166,7 @@ export function createApi({ now = Date.now } = {}) {
 
   // ---------- admin: items ----------
 
-  route('POST', '/api/admin/collections/:id/items', { role: 'creator' }, async (ctx) => {
+  route('POST', '/api/admin/collections/:id/items', { auth: true }, async (ctx) => {
     const { db, body } = ctx;
     const c = await managedCollection(ctx, ctx.params.id);
     const title = str(body.title, 'title', { required: true, max: 120 });
@@ -1118,7 +1191,7 @@ export function createApi({ now = Date.now } = {}) {
     return [201, { item: serializeItem(item) }];
   });
 
-  route('PATCH', '/api/admin/items/:id', { role: 'creator' }, async (ctx) => {
+  route('PATCH', '/api/admin/items/:id', { auth: true }, async (ctx) => {
     const { db, body } = ctx;
     const item = await managedItem(ctx, ctx.params.id);
     const title = str(body.title, 'title', { max: 120 }) || item.title;
@@ -1148,7 +1221,7 @@ export function createApi({ now = Date.now } = {}) {
     return { item: serializeItem(updated) };
   });
 
-  route('DELETE', '/api/admin/items/:id', { role: 'creator' }, async (ctx) => {
+  route('DELETE', '/api/admin/items/:id', { auth: true }, async (ctx) => {
     const { db } = ctx;
     const item = await managedItem(ctx, ctx.params.id);
     await run(db, 'DELETE FROM items WHERE id = ?', item.id);
@@ -1156,8 +1229,12 @@ export function createApi({ now = Date.now } = {}) {
     return { ok: true };
   });
 
-  // Pickup tracking is part of the results overview, so it's for managers and admins.
-  route('PATCH', '/api/admin/allocations/:id', { role: 'manager' }, async ({ db, params, body }) => {
+  // Ticking items off as picked up: whoever manages the collection.
+  route('PATCH', '/api/admin/allocations/:id', { auth: true }, async (ctx) => {
+    const { db, params, body } = ctx;
+    const a = await first(db, 'SELECT i.collection_id FROM allocations a JOIN items i ON i.id = a.item_id WHERE a.id = ?', Number(params.id));
+    if (!a) throw new HttpError(404, 'Allocation not found');
+    await managedCollection(ctx, a.collection_id);
     const r = await run(
       db,
       'UPDATE allocations SET collected_at = ? WHERE id = ?',
@@ -1211,13 +1288,13 @@ export function createApi({ now = Date.now } = {}) {
         ctx.user = await first(
           db,
           `SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id
-            WHERE s.token_hash = ? AND s.expires_at > ?`,
+            WHERE s.token_hash = ? AND s.expires_at > ? AND u.blocked_at IS NULL`,
           ctx.tokenHash,
           now()
         );
       }
       if ((match.opts.auth || match.opts.role) && !ctx.user) throw new HttpError(401, 'Please log in');
-      if (match.opts.role && !atLeast(ctx.user, match.opts.role)) {
+      if (match.opts.role === 'admin' && !isAdmin(ctx.user)) {
         throw new HttpError(403, "You don't have permission to do this");
       }
       if (request.method !== 'GET') ctx.body = await readBody(request);

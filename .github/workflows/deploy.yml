@@ -94,6 +94,13 @@ jobs:
           fi
           echo "url=$url" >> "$GITHUB_OUTPUT"
           echo "API deployed to $url"
+      - name: Store the bot-check secret (optional)
+        if: steps.creds.outputs.ok == 'true'
+        env:
+          TURNSTILE_SECRET: ${{ secrets.TURNSTILE_SECRET }}
+        run: |
+          if [ -z "$TURNSTILE_SECRET" ]; then echo "No TURNSTILE_SECRET; sign-up runs without a bot check"; exit 0; fi
+          printf '%s' "$TURNSTILE_SECRET" | npx wrangler secret put TURNSTILE_SECRET
 
   pages:
     needs: [test, worker]
@@ -113,12 +120,13 @@ jobs:
       - name: Point the frontend at the API
         env:
           API_URL: ${{ vars.SWIPIO_API_URL || needs.worker.outputs.url }}
+          TURNSTILE_SITE_KEY: ${{ vars.SWIPIO_TURNSTILE_SITE_KEY }}
         run: |
           if [ -z "$API_URL" ]; then
             echo "::error::No API URL. Add the CLOUDFLARE_API_TOKEN secret, or set the SWIPIO_API_URL variable."
             exit 1
           fi
-          echo "window.SWIPIO_CONFIG = { apiUrl: '${API_URL%/}' };" > public/config.js
+          echo "window.SWIPIO_CONFIG = { apiUrl: '${API_URL%/}', turnstileSiteKey: '${TURNSTILE_SITE_KEY}' };" > public/config.js
           cat public/config.js
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3

@@ -4,10 +4,10 @@ import { createD1 } from './d1-shim.js';
 export const HOUR = 3600 * 1000;
 export const ORIGIN = 'https://locutus75.github.io';
 
-export function setup({ allowedOrigins = `${ORIGIN},http://localhost:3100` } = {}) {
+export function setup({ allowedOrigins = `${ORIGIN},http://localhost:3100`, env: extraEnv = {} } = {}) {
   let clock = Date.parse('2026-01-01T12:00:00Z');
   const api = createApi({ now: () => clock });
-  const env = { DB: createD1(), ALLOWED_ORIGINS: allowedOrigins };
+  const env = { DB: createD1(), ALLOWED_ORIGINS: allowedOrigins, ...extraEnv };
 
   /** A client that remembers its session token, like a browser tab. */
   function client() {

@@ -9,14 +9,12 @@
 const $app = document.getElementById('app');
 let me = null;
 
-// participant < creator < manager < admin: each role can do everything the roles below it can.
-const ROLES = ['participant', 'creator', 'manager', 'admin'];
-const ROLE_LABELS = { participant: 'Participant', creator: 'Creator', manager: 'Manager', admin: 'Admin' };
+// Everyone can make collections ('creator', shown as "User"); admins also run the platform.
+const ROLES = ['creator', 'admin'];
+const ROLE_LABELS = { creator: 'User', admin: 'Admin' };
 const ROLE_HINTS = {
-  participant: 'Swipes on collections they are invited to',
-  creator: 'Also creates and runs their own collections',
-  manager: 'Also sees all collections, who chose what, and manages people',
-  admin: 'Can do everything, including managing admins',
+  creator: 'Swipes on collections they are invited to, and makes their own',
+  admin: 'Also sees every collection and manages all accounts',
 };
 const roleRank = (role) => ROLES.indexOf(role);
 /** True if the signed-in user has at least this role. */
@@ -267,7 +265,7 @@ function topbar(...right) {
 
 function userMenu() {
   return [
-    can('creator') && h('a', { class: 'btn', href: '#/admin' }, '⚙️ Manage'),
+    h('a', { class: 'btn', href: '#/admin' }, '⚙️ Manage'),
     h(
       'button',
       {
@@ -333,11 +331,12 @@ function confirmDialog(message, { title = 'Are you sure?', confirmLabel = 'OK', 
 const routes = [
   [/^#\/setup$/, viewSetup, { public: true }],
   [/^#\/login$/, viewLogin, { public: true }],
+  [/^#\/signup$/, viewSignup, { public: true }],
   [/^#\/invite\/([\w-]+)$/, viewInvite, { public: true }],
   [/^#\/c\/(\d+)$/, viewCollection],
-  [/^#\/admin$/, viewAdmin, { role: 'creator' }],
-  [/^#\/admin\/users$/, viewAdminUsers, { role: 'manager' }],
-  [/^#\/admin\/c\/(\d+)(?:\/(items|people|results|settings))?$/, viewAdminCollection, { role: 'creator' }],
+  [/^#\/admin$/, viewAdmin],
+  [/^#\/admin\/users$/, viewAdminUsers, { role: 'admin' }],
+  [/^#\/admin\/c\/(\d+)(?:\/(items|people|results|settings))?$/, viewAdminCollection],
   [/^#?\/?$/, viewHome],
 ];
 
@@ -452,9 +451,68 @@ async function viewLogin() {
         ),
         h('button', { class: 'primary block', type: 'submit' }, 'Log in')
       ),
-      h('p', { class: 'muted small' }, 'No account yet? Ask an admin for an invite link.')
+      h('p', { class: 'muted small' }, 'No account yet? ', h('a', { href: '#/signup' }, 'Create one'), '. Got an invite link? Open it to set your password.')
     )
   );
+}
+
+/** Loads Cloudflare Turnstile (bot check) once, if a site key is configured. */
+let turnstileLoading;
+function loadTurnstile() {
+  turnstileLoading ||= new Promise((resolve, reject) => {
+    const s = h('script', { src: 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit', async: true });
+    s.onload = () => resolve(window.turnstile);
+    s.onerror = () => ((turnstileLoading = null), reject(new Error('Could not load the "are you human" check. Please reload.')));
+    document.head.append(s);
+  });
+  return turnstileLoading;
+}
+
+async function viewSignup() {
+  if (me) return go('#/');
+  const siteKey = window.SWIPIO_CONFIG?.turnstileSiteKey;
+  const widget = siteKey ? h('div', { class: 'turnstile' }) : null;
+  let widgetId = null;
+  mount(
+    authCard(
+      h('h2', {}, 'Create an account'),
+      h('p', { class: 'muted' }, 'Make your own collections and invite people to swipe on them.'),
+      h(
+        'form',
+        {
+          class: 'stack',
+          onsubmit: action(async (e) => {
+            const f = formData(e.target);
+            if (siteKey) {
+              f.turnstileToken = window.turnstile?.getResponse(widgetId);
+              if (!f.turnstileToken) throw new Error('Please complete the "are you human" check first.');
+            }
+            try {
+              signedIn(await api('POST', '/api/signup', f));
+            } catch (err) {
+              if (siteKey && window.turnstile) window.turnstile.reset(widgetId);
+              throw err;
+            }
+            toast(`Welcome, ${me.name}!`);
+            go('#/admin');
+          }),
+        },
+        h('label', {}, 'Your name', h('input', { name: 'name', required: true, autocomplete: 'name' })),
+        h('label', {}, 'Email', h('input', { name: 'email', type: 'email', required: true, autocomplete: 'email' })),
+        h('label', {}, 'Password', h('input', { name: 'password', type: 'password', required: true, minlength: 8, autocomplete: 'new-password' })),
+        widget,
+        h('button', { class: 'primary block', type: 'submit' }, 'Create account')
+      ),
+      h('p', { class: 'muted small' }, 'Already have an account? ', h('a', { href: '#/login' }, 'Log in'))
+    )
+  );
+  if (siteKey) {
+    loadTurnstile()
+      .then((ts) => {
+        if (widget.isConnected) widgetId = ts.render(widget, { sitekey: siteKey });
+      })
+      .catch((err) => toast(err.message));
+  }
 }
 
 async function viewInvite(token) {
@@ -528,8 +586,8 @@ async function viewHome() {
           'div',
           { class: 'empty' },
           h('div', { class: 'big' }, '🛍️'),
-          h('p', {}, "You haven't been invited to any collections yet."),
-          can('creator') && h('a', { class: 'btn primary', href: '#/admin' }, 'Create a collection')
+          h('p', {}, "You haven't been invited to any collections yet. Make one yourself and invite others to swipe on it."),
+          h('a', { class: 'btn primary', href: '#/admin' }, 'Create a collection')
         )
   );
 }
@@ -844,7 +902,7 @@ function adminTabs(current) {
     'div',
     { class: 'tabs' },
     h('button', { class: current === 'collections' ? 'active' : '', onclick: () => go('#/admin') }, 'Collections'),
-    can('manager') && h('button', { class: current === 'users' ? 'active' : '', onclick: () => go('#/admin/users') }, 'People')
+    can('admin') && h('button', { class: current === 'users' ? 'active' : '', onclick: () => go('#/admin/users') }, 'People')
   );
 }
 
@@ -886,23 +944,25 @@ function inviteForm({ collectionId, onCreated }) {
       class: 'card stack',
       onsubmit: action(async (e) => {
         const f = formData(e.target);
-        const { user } = await api('POST', '/api/admin/users', {
+        const { user, existing } = await api('POST', '/api/admin/users', {
           name: f.name,
           email: f.email,
           role: f.role,
           collectionIds: collectionId ? [Number(collectionId)] : [],
         });
         e.target.reset();
-        inviteDialog(user);
+        if (existing) toast(collectionId ? `${user.name} already has an account and was added` : `${user.email} already has an account`);
+        else inviteDialog(user);
         onCreated(user);
       }),
     },
-    h('h3', {}, collectionId ? 'Invite someone new to this collection' : 'Invite someone'),
+    h('h3', {}, collectionId ? 'Invite someone to this collection' : 'Invite someone'),
+    collectionId && h('p', { class: 'muted small', style: { margin: 0 } }, 'Already on Swipio? They are added straight away. Otherwise you get an invite link to send them.'),
     h('div', { class: 'grid-2' },
       h('label', {}, 'Name', h('input', { name: 'name', required: true })),
       h('label', {}, 'Email', h('input', { name: 'email', type: 'email', required: true }))
     ),
-    !collectionId && h('label', {}, 'Role', roleSelect('participant')),
+    !collectionId && h('label', {}, 'Role', roleSelect('creator')),
     h('button', { class: 'primary', type: 'submit' }, 'Create invite')
   );
 }
@@ -920,22 +980,21 @@ function roleSelect(value, attrs = {}) {
 }
 
 function roleBadge(role) {
-  return role && role !== 'participant' ? h('span', { class: `badge role-${role}` }, ROLE_LABELS[role]) : null;
+  return role === 'admin' ? h('span', { class: 'badge role-admin' }, ROLE_LABELS[role]) : null;
 }
 
 /** Everything you can do with one person: role, invite link / password reset, delete. */
 function openUserSheet(u, onChange) {
   const self = u.id === me.id;
-  const manageable = !self && roleRank(u.role) <= roleRank(me.role);
-  const badge = () => roleBadge(u.role) || h('span', { class: 'badge' }, 'Participant');
+  const manageable = !self && can('admin');
+  const badge = () => roleBadge(u.role) || h('span', { class: 'badge' }, 'User');
   let currentBadge = badge();
   const body = h(
     'div',
     { class: 'stack' },
     h('div', {}, h('div', { class: 'name' }, u.name), h('div', { class: 'muted small' }, u.email)),
-    h('div', { class: 'row' }, currentBadge, u.status === 'invited' ? h('span', { class: 'badge' }, 'Invited') : h('span', { class: 'badge open' }, 'Active')),
-    self && h('p', { class: 'muted small' }, "This is you. Someone else has to change your role."),
-    !self && !manageable && h('p', { class: 'muted small' }, `Only an admin can change ${ROLE_LABELS[u.role]} accounts.`),
+    h('div', { class: 'row' }, currentBadge, u.blocked ? h('span', { class: 'badge danger' }, 'Blocked') : u.status === 'invited' ? h('span', { class: 'badge' }, 'Invited') : h('span', { class: 'badge open' }, 'Active')),
+    self && h('p', { class: 'muted small' }, "This is you. Another admin has to change your role."),
     manageable &&
       h('label', {}, 'Role', roleSelect(u.role, {
         onchange: action(async (e) => {
@@ -962,9 +1021,20 @@ function openUserSheet(u, onChange) {
       }, '🔑 Reset password'),
     manageable &&
       h('button', {
+        onclick: action(async () => {
+          const block = !u.blocked;
+          if (block && !(await confirmDialog(`${u.name} is signed out and can't log in until you unblock them. Their collections and swipes stay.`, { title: `Block ${u.name}?`, confirmLabel: 'Block', danger: true }))) return;
+          await api('PATCH', `/api/admin/users/${u.id}`, { blocked: block });
+          toast(block ? `${u.name} is blocked` : `${u.name} can log in again`);
+          dlg.close();
+          onChange();
+        }),
+      }, u.blocked ? '✅ Unblock' : '⛔ Block'),
+    manageable &&
+      h('button', {
         class: 'danger',
         onclick: action(async () => {
-          if (!(await confirmDialog(`Their swipes and items are removed too. This can't be undone.`, { title: `Delete ${u.name}?`, confirmLabel: 'Delete', danger: true }))) return;
+          if (!(await confirmDialog(`Their swipes and items are removed too, and collections they made lose their maker (admins can still manage them). This can't be undone.`, { title: `Delete ${u.name}?`, confirmLabel: 'Delete', danger: true }))) return;
           await api('DELETE', `/api/admin/users/${u.id}`);
           dlg.close();
           onChange();
@@ -982,7 +1052,7 @@ async function viewAdminUsers() {
       { class: 'item-row item-button', onclick: () => openUserSheet(u, () => render()) },
       h('div', { class: 'thumb' }, u.name.charAt(0).toUpperCase()),
       h('div', { class: 'grow' }, h('div', { class: 'name' }, u.name, ' ', roleBadge(u.role)), h('div', { class: 'muted small' }, u.email)),
-      u.status === 'invited' && h('span', { class: 'badge' }, 'Invited'),
+      u.blocked ? h('span', { class: 'badge danger' }, 'Blocked') : u.status === 'invited' && h('span', { class: 'badge' }, 'Invited'),
       h('span', { class: 'chev', 'aria-hidden': 'true' }, '›')
     );
 
@@ -1012,11 +1082,11 @@ async function viewAdmin() {
               { class: 'card collection-card', href: `#/admin/c/${c.id}` },
               h('div', { class: 'row spread' }, h('h3', {}, c.name), countdown(c)),
               h('div', { class: 'muted small' }, `${plural(c.itemCount, 'item')} · ${plural(c.memberCount, 'person', 'people')} · closes ${formatDate(c.expiresAt)}`),
-              can('manager') && c.createdBy && c.createdBy.id !== me.id && h('div', { class: 'muted small' }, `by ${c.createdBy.name}`),
+              can('admin') && !c.mine && !c.sharedWithMe && h('div', { class: 'muted small' }, `by ${c.createdBy ? c.createdBy.name : 'a removed user'}`),
               c.sharedWithMe && h('div', { class: 'small' }, h('span', { class: 'badge role-creator' }, `Shared with you${c.createdBy ? ` · made by ${c.createdBy.name}` : ''}`))
             )
           )
-        : h('div', { class: 'empty' }, h('div', { class: 'big' }, '📦'), h('p', {}, can('manager') ? 'No collections yet. Create one, then snap photos of the items.' : "You haven't created any collections yet. Create one, then snap photos of the items."))
+        : h('div', { class: 'empty' }, h('div', { class: 'big' }, '📦'), h('p', {}, "You haven't created any collections yet. Create one, snap photos of the items, then invite people. Only you and the people you invite can see it."))
     )
   );
 }
@@ -1652,7 +1722,7 @@ async function viewAdminCollection(id, tab) {
     data.choices.filter((c) => c.itemId === itemId && c.liked).map((c) => data.members.find((m) => m.id === c.userId)?.name).filter(Boolean);
 
   function openChoicesSheet(member) {
-    if (can('admin')) return openChoicesEditor(member);
+    if (data.canAllocate) return openChoicesEditor(member);
     const mine = choicesOf(member.id);
     const itemById = new Map(data.items.map((i) => [i.id, i]));
     const list = (liked) =>
@@ -1765,12 +1835,10 @@ async function viewAdminCollection(id, tab) {
                 u.status === 'invited' && u.inviteToken && h('button', { type: 'button', 'aria-label': 'Invite link', onclick: (e) => { e.preventDefault(); inviteDialog(u); } }, '✉️')
               )
             )
-          : h('p', { class: 'muted' }, can('manager') ? 'No people yet. Invite someone below.' : 'No people yet.'),
+          : h('p', { class: 'muted' }, 'No people yet. Invite someone below.'),
         h('div', { class: 'row', style: { marginTop: '12px' } }, h('button', { class: 'primary', type: 'submit' }, 'Save participants'))
       ),
-      can('manager')
-        ? h('div', { class: 'section' }, inviteForm({ collectionId: id, onCreated: () => reopen('people') }))
-        : h('p', { class: 'muted small section' }, 'Someone new? Ask a manager to invite them, then tick them here.')
+      h('div', { class: 'section' }, inviteForm({ collectionId: id, onCreated: () => reopen('people') }))
     );
   };
 
@@ -1786,10 +1854,10 @@ async function viewAdminCollection(id, tab) {
         h('h3', {}, 'Who can manage this'),
         h('p', { class: 'muted small' }, `Made by ${data.createdBy?.id === me.id ? 'you' : owner}.`),
         data.editors.length > 0 && h('p', { class: 'small' }, `Also managed by ${data.editors.map((e) => (e.id === me.id ? 'you' : e.name)).join(', ')}.`),
-        h('p', { class: 'muted small' }, 'Managers and admins can manage every collection. Ask one of them to add someone here.')
+        h('p', { class: 'muted small' }, 'Only the maker of this collection can change who manages it.')
       );
     }
-    const creators = users.filter((u) => u.role === 'creator' && u.id !== data.createdBy?.id);
+    const creators = data.members.filter((u) => u.id !== data.createdBy?.id);
     return h(
       'form',
       {
@@ -1802,7 +1870,7 @@ async function viewAdminCollection(id, tab) {
         }),
       },
       h('h3', {}, 'Who can manage this'),
-      h('p', { class: 'muted small' }, `Made by ${data.createdBy?.id === me.id ? 'you' : owner}. Managers and admins can always manage it. Tick creators who may manage it too: items, deadline, participants, publishing. Only the maker and managers can delete it.`),
+      h('p', { class: 'muted small' }, `Made by ${data.createdBy?.id === me.id ? 'you' : owner}. Tick participants who may help manage it: items, deadline, participants, results and hand-outs. Only the maker can delete or reopen it, or change this list.`),
       creators.length
         ? creators.map((u) =>
             h(
@@ -1812,7 +1880,7 @@ async function viewAdminCollection(id, tab) {
               h('div', { class: 'grow' }, h('div', { class: 'name' }, u.name), h('div', { class: 'muted small' }, u.email))
             )
           )
-        : h('p', { class: 'muted small' }, 'There are no other creators yet. Give someone the Creator role under Manage → People first.'),
+        : h('p', { class: 'muted small' }, 'Add people under the People tab first; then you can pick co-managers from them here.'),
       creators.length > 0 && h('button', { class: 'primary', type: 'submit' }, 'Save')
     );
   };
@@ -1956,7 +2024,7 @@ async function viewAdminCollection(id, tab) {
     });
 
   const renderResultsByPerson = () => {
-    const isAdmin = can('admin');
+    const isAdmin = data.canAllocate;
     const byUser = new Map();
     const group = (userId, name) => {
       if (!byUser.has(userId)) byUser.set(userId, { name, list: [], removed: [] });

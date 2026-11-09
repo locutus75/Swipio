@@ -25,6 +25,9 @@ ALLOWED_ORIGINS = "https://swipio.hihybi.org,https://locutus75.github.io,http://
 # PBKDF2 rounds for new passwords (max 100000). 100000 takes ~15 ms of CPU, fine on Workers Paid.
 # On the Workers Free plan (10 ms CPU per request) use 50000. Existing passwords keep working either way.
 PASSWORD_ITERATIONS = "100000"
+# Anyone can sign up; this caps how many new accounts (not invited ones) are made per hour.
+SIGNUPS_PER_HOUR = "30"
+# Optional bot check on sign-up: set the TURNSTILE_SECRET secret (see README).
 
 # Keep request logs (including errors such as exceeded CPU time) for the Cloudflare dashboard:
 # Workers & Pages > swipio > Logs.

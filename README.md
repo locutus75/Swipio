@@ -1,7 +1,7 @@
 # Swipio
 
-Tinder-style swiping, but for items. A creator puts items into a **collection**, sets a
-deadline and invites people. Participants swipe right on what they want and left on what
+Tinder-style swiping, but for items. Anyone can sign up, put items into a **collection**, set a
+deadline and invite people. Participants swipe right on what they want and left on what
 they don't. When the timer runs out the items are allocated and everyone sees what they
 can pick up.
 
@@ -13,14 +13,22 @@ can pick up.
 - Live countdown per collection
 - When it closes: "You get N items" with the pickup status of each one
 
-**Roles.** There are four, and each role can do everything the roles below it can:
-
-| Role | Can |
-| --- | --- |
-| **Participant** | Swipe on the collections they're invited to |
-| **Creator** | Also create and run **their own** collections, plus collections a manager shared with them: items and photos, deadline, publish, close, and pick participants from existing people. Sees totals (likes per item, how far people are), not who chose what |
-| **Manager** | Also see and run **all** collections, choose which creators may co-manage a collection, see **who chose what**, see results per person and track pickups, and invite/manage people up to Manager |
-| **Admin** | Everything, including making and managing other admins. The first account is the admin |
+**Accounts and privacy**
+- Anyone can **create an account** (*Create one* on the login page) and start making collections
+  straight away. People you invite can do the same
+- A collection is only visible to the person who made it, the people they picked as **co-managers**,
+  and the people **invited** to swipe on it. Nobody else sees it or its people
+- The maker has full control over their collection: items, deadline, participants, who chose what,
+  results, hand-outs and pickups, reopening and deleting (*Settings → Delete collection*)
+- **Co-managers** (Settings → *Who can manage this*, picked from the collection's participants) can
+  do the same, except delete or reopen it, or change who else may manage it
+- Invite people by name and email. Someone who already has an account is added straight away;
+  anyone else gets an invite link to copy, email or share, and sets their own password
+- **Admins** run the platform: they see and can manage every collection, and manage all accounts
+  under *Manage → People* (make someone admin, reset a password, **block** or delete an account).
+  The first account is the admin
+- New sign-ups are capped at `SIGNUPS_PER_HOUR` (30) per hour. An optional bot check
+  (Cloudflare Turnstile) can be switched on; see [Bot check on sign-up](#bot-check-on-sign-up-optional)
 
 **Creating collections**
 - Create collections with a name, description and closing time (quick picks: 1 day, 3 days, 1 week, 2 weeks); keep them as drafts until you tap **Publish**
@@ -29,18 +37,14 @@ can pick up.
   them in one list. Items upload in the background while you carry on, and photos are shrunk in
   the browser first, so even big phone photos upload quickly. Items can also have a description,
   a quantity, or an image link instead of a photo
-- Close a collection early. **Reopen** a closed one with a new deadline (admins and the collection's
-  maker only) to add items: participants then only swipe what they haven't judged yet and can still
+- Close a collection early. **Reopen** a closed one with a new deadline (the collection's maker and
+  admins only) to add items: participants then only swipe what they haven't judged yet and can still
   change earlier choices. The allocation is saved as a version and set aside, except items already
   picked up, which stay with their person; everything else is handed out again at the new deadline
 
-**Managing people and results** (Manager and Admin)
-- Invite people by name and email. You get an invite link to copy, email or share; the
-  person sets their own password. Invite straight into a collection, or from the People page
+**People and results** (for whoever manages the collection)
 - Per collection: what each person wants and passed on, and who wants each item
-- Per collection (Settings → *Who can manage this*): tick creators who may co-manage it. They can do everything its maker can, except delete it or change who else may manage it
 - Results page per person, with a checkbox to mark items as collected, plus a list of unclaimed items
-- Manage people: roles, password reset (gives a new invite link), delete
 
 ### How items are allocated
 
@@ -55,7 +59,7 @@ When a collection closes:
    items so far**. Remaining ties are broken by a seeded random draw, so results are fair
    and can be reproduced. The least contested items are handed out first.
 
-**After the allocation (Admin).** On a closed collection's Results tab an admin can:
+**After the allocation.** On a closed collection's Results tab whoever manages it can:
 - See under **Not handed out** why each leftover item wasn't given to anyone (e.g. *Wanted by Kim*,
   *Taken away from Egbert*, *Only liked by someone who no longer participates*, *Nobody wanted this*).
 - **Take items away** from someone (✕ per item, or *Take all away*). The units become free, and
@@ -116,7 +120,7 @@ npm run dev        # http://localhost:3100
 This runs the real Worker and a local D1 database (in `.wrangler/`) with Cloudflare's
 `wrangler` tool, and serves the frontend on the same port. No Cloudflare account is needed.
 On the first visit you create the admin account. Then create a collection, add items,
-invite people, and tick **Published**.
+invite people, and tick **Published**. Others can sign up via *Create one* on the login page.
 
 ```bash
 npm test           # allocation unit tests + API tests (runs the Worker against an in-memory database)
@@ -150,6 +154,18 @@ whoever opens the site first can claim it.
   server". Swipio currently runs at https://swipio.hihybi.org.
 - **API:** add a custom domain to the Worker in Cloudflare, and set the repository **variable**
   `SWIPIO_API_URL` (e.g. `https://api.swipio.example`) so the site uses it.
+
+### Bot check on sign-up (optional)
+
+Sign-up is open to everyone. To keep bots out, switch on Cloudflare Turnstile (free):
+1. In the Cloudflare dashboard go to *Turnstile > Add widget*, name it Swipio, add the hostname
+   of the site (e.g. `swipio.hihybi.org`) and choose *Managed*.
+2. In this repo (*Settings > Secrets and variables > Actions*) add the **secret**
+   `TURNSTILE_SECRET` (the widget's secret key) and the **variable** `SWIPIO_TURNSTILE_SITE_KEY`
+   (its site key).
+3. Push to `main` (or re-run the deploy). The sign-up page then shows the check and the API verifies it.
+
+Without these, sign-up works without a bot check. Admins can always block accounts under *Manage → People*.
 
 ### Deploying by hand
 

@@ -69,7 +69,9 @@ test('full flow: setup, invite, swipe, expire, collect', async () => {
   // Draft collections are hidden from participants
   assert.deepEqual((await bob('GET', '/api/collections')).data.collections, []);
   assert.equal((await bob('GET', `/api/collections/${cid}`)).status, 404);
-  assert.equal((await bob('GET', '/api/admin/users')).status, 403);
+  // Bob only sees himself: nobody he invited or manages a collection with
+  assert.deepEqual((await bob('GET', '/api/admin/users')).data.users.map((u) => u.name), ['Bobby']);
+  assert.equal((await bob('PATCH', `/api/admin/users/1`, { name: 'Hacked' })).status, 403);
 
   await admin('PATCH', `/api/admin/collections/${cid}`, { published: true });
   r = await bob('GET', '/api/collections');

@@ -33,7 +33,7 @@ test('0002_roles upgrades an existing database without losing data', () => {
 test('later migrations apply on top of 0002', () => {
   const db = new DatabaseSync(':memory:');
   db.exec('PRAGMA foreign_keys = ON;');
-  for (const f of ['0001_init.sql', '0002_roles.sql', '0003_collection_editors.sql', '0004_allocation_round.sql', '0005_allocation_exclusions.sql', '0006_item_groups.sql', '0007_allocation_versions.sql']) db.exec(sql(f));
+  for (const f of ['0001_init.sql', '0002_roles.sql', '0003_collection_editors.sql', '0004_allocation_round.sql', '0005_allocation_exclusions.sql', '0006_item_groups.sql', '0007_allocation_versions.sql', '0008_open_signup.sql']) db.exec(sql(f));
   db.exec(`
     INSERT INTO users (id, name, email, created_at) VALUES (1, 'Cas', 'cas@x', 0);
     INSERT INTO collections (id, name, expires_at, created_at) VALUES (1, 'C', 0, 0);
@@ -41,4 +41,22 @@ test('later migrations apply on top of 0002', () => {
     DELETE FROM collections WHERE id = 1;
   `);
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM collection_editors').get().n, 0, 'cascades with the collection');
+});
+
+test('0008_open_signup turns participants and managers into regular users', () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec('PRAGMA foreign_keys = ON;');
+  for (const f of fs.readdirSync(new URL('../migrations/', import.meta.url)).sort()) {
+    if (f >= '0008') continue;
+    db.exec(sql(f));
+  }
+  db.exec(`INSERT INTO users (id, name, email, access_role, created_at) VALUES
+    (1, 'Ada', 'ada@x', 'admin', 0), (2, 'Max', 'max@x', 'manager', 0), (3, 'Cas', 'cas@x', 'creator', 0), (4, 'Pim', 'pim@x', 'participant', 0);`);
+  db.exec(sql('0008_open_signup.sql'));
+  assert.deepEqual(
+    db.prepare('SELECT access_role FROM users ORDER BY id').all().map((r) => r.access_role),
+    ['admin', 'creator', 'creator', 'creator']
+  );
+  db.exec('UPDATE users SET invited_by = 1, blocked_at = 5 WHERE id = 4; DELETE FROM users WHERE id = 1;');
+  assert.equal(db.prepare('SELECT invited_by FROM users WHERE id = 4').get().invited_by, null, 'inviter deleted → SET NULL');
 });
