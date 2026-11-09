@@ -1175,3 +1175,19 @@ dialog.confirm p {
   min-width: 2em;
   color: var(--muted);
 }
+
+/* Home: invitation to start your own collection */
+.start-own {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.start-own h3 {
+  margin: 0 0 4px;
+}
+
+.start-own p {
+  margin: 0;
+}

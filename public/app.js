@@ -581,13 +581,25 @@ async function viewHome() {
     topbar(...userMenu()),
     h('h1', {}, `Hi ${me.name.split(' ')[0]}!`),
     collections.length
-      ? h('div', { class: 'list' }, collections.map(card))
+      ? [
+          h('div', { class: 'list' }, collections.map(card)),
+          h(
+            'div',
+            { class: 'card start-own section' },
+            h('div', { class: 'grow' },
+              h('h3', {}, 'Got things to give away yourself?'),
+              h('p', { class: 'muted small' }, 'Start your own collection and invite people to swipe on it. Only you and the people you invite can see it.')
+            ),
+            h('button', { class: 'primary', onclick: openNewCollectionSheet }, '＋ Start your own collection'),
+            h('a', { class: 'small', href: '#/admin' }, 'Your collections →')
+          ),
+        ]
       : h(
           'div',
           { class: 'empty' },
           h('div', { class: 'big' }, '🛍️'),
           h('p', {}, "You haven't been invited to any collections yet. Make one yourself and invite others to swipe on it."),
-          h('a', { class: 'btn primary', href: '#/admin' }, 'Create a collection')
+          h('button', { class: 'primary', onclick: openNewCollectionSheet }, '＋ Start your own collection')
         )
   );
 }
