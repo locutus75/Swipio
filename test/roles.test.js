@@ -183,3 +183,62 @@ test('an editor who is demoted to participant loses access', async () => {
   await t.manager.client('PATCH', `/api/admin/users/${t.creator2.id}`, { role: 'participant' });
   assert.equal((await t.creator2.client('GET', `/api/admin/collections/${cid}`)).status, 403);
 });
+
+test('admins can redo an allocation; picked-up items stay put by default', async () => {
+  const t = await team();
+  const { data } = await t.admin('POST', '/api/admin/collections', { name: 'Redo', expiresAt: t.srv.now() + HOUR, published: true });
+  const cid = data.collection.id;
+  const ids = [];
+  for (const title of ['A', 'B', 'C', 'D', 'E', 'F']) ids.push((await t.admin('POST', `/api/admin/collections/${cid}/items`, { title })).data.item.id);
+  // Two people both want all six single items: every item is contested.
+  const p2 = await (async () => {
+    const { data: d } = await t.admin('POST', '/api/admin/users', { name: 'Ole', email: 'ole@example.com' });
+    const c = t.srv.client();
+    await c('POST', `/api/invites/${d.user.inviteToken}`, { password: 'olepassword' });
+    return { client: c, id: d.user.id };
+  })();
+  await t.admin('PUT', `/api/admin/collections/${cid}/members`, { userIds: [t.participant.id, p2.id] });
+  for (const id of ids) {
+    await t.participant.client('PUT', `/api/items/${id}/swipe`, { liked: true });
+    await p2.client('PUT', `/api/items/${id}/swipe`, { liked: true });
+  }
+
+  // Not possible before the collection is allocated, and only for admins
+  assert.equal((await t.admin('POST', `/api/admin/collections/${cid}/reallocate`)).status, 409);
+  await t.admin('POST', `/api/admin/collections/${cid}/close`);
+  assert.equal((await t.manager.client('POST', `/api/admin/collections/${cid}/reallocate`)).status, 403);
+
+  const snapshot = async () =>
+    (await t.admin('GET', `/api/admin/collections/${cid}`)).data.allocations.map((a) => `${a.itemTitle}:${a.userName}`).sort();
+  let r = await t.admin('GET', `/api/admin/collections/${cid}`);
+  assert.equal(r.data.allocations.length, 6);
+  assert.equal(r.data.allocationRound, 0);
+  const picked = r.data.allocations.find((a) => a.itemTitle === 'A');
+  await t.admin('PATCH', `/api/admin/allocations/${picked.id}`, { collected: true });
+
+  // Redo until the draw changes (it's random per round, so a few rounds is plenty)
+  const before = await snapshot();
+  let after = before;
+  for (let i = 0; i < 10 && after.join() === before.join(); i++) {
+    r = await t.admin('POST', `/api/admin/collections/${cid}/reallocate`, {});
+    assert.equal(r.status, 200);
+    assert.equal(r.data.kept, 1);
+    after = await snapshot();
+  }
+  assert.notDeepEqual(after, before, 'a redo produces a new draw');
+  assert.equal(after.length, 6, 'still every item handed out once');
+  r = await t.admin('GET', `/api/admin/collections/${cid}`);
+  const a = r.data.allocations.find((x) => x.itemTitle === 'A');
+  assert.equal(`${a.userName}:${a.collected}`, `${picked.userName}:true`, 'picked-up item kept its person and status');
+  assert.ok(r.data.allocationRound >= 1);
+  // Fair split still holds: 3 each
+  const per = {};
+  r.data.allocations.forEach((x) => (per[x.userName] = (per[x.userName] || 0) + 1));
+  assert.deepEqual(Object.values(per).sort(), [3, 3]);
+
+  // Redo everything, including picked-up items
+  r = await t.admin('POST', `/api/admin/collections/${cid}/reallocate`, { keepCollected: false });
+  assert.equal(r.data.kept, 0);
+  r = await t.admin('GET', `/api/admin/collections/${cid}`);
+  assert.equal(r.data.allocations.filter((x) => x.collected).length, 0);
+});

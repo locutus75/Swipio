@@ -7,11 +7,14 @@
  *   seeded shuffle so results are reproducible.
  * - Contested items are processed from least to most contested, so that a person
  *   winning a hotly contested item does not also hoover up the easier ones.
+ * - `fixed` allocations (e.g. items already picked up when an admin redoes the allocation)
+ *   stay as they are: they use up units and count towards each person's total, and only
+ *   the new allocations are returned.
  *
- * @param {{items: {id:number, quantity:number}[], likes: {itemId:number, userId:number}[], seed: string|number}} input
+ * @param {{items: {id:number, quantity:number}[], likes: {itemId:number, userId:number}[], seed: string|number, fixed?: {itemId:number, userId:number}[]}} input
  * @returns {{itemId:number, userId:number}[]}
  */
-export function allocate({ items, likes, seed }) {
+export function allocate({ items, likes, seed, fixed = [] }) {
   const rand = mulberry32(hashString(String(seed)));
   const likersByItem = new Map();
   for (const { itemId, userId } of likes) {
@@ -21,6 +24,13 @@ export function allocate({ items, likes, seed }) {
   }
 
   const counts = new Map();
+  const taken = new Map(); // itemId -> Set of userIds that already have one
+  for (const { itemId, userId } of fixed) {
+    if (!taken.has(itemId)) taken.set(itemId, new Set());
+    if (taken.get(itemId).has(userId)) continue;
+    taken.get(itemId).add(userId);
+    counts.set(userId, (counts.get(userId) || 0) + 1);
+  }
   const result = [];
   const give = (itemId, userId) => {
     result.push({ itemId, userId });
@@ -29,8 +39,9 @@ export function allocate({ items, likes, seed }) {
 
   const contested = [];
   for (const item of items) {
-    const likers = likersByItem.get(item.id) || [];
-    const qty = Math.max(0, Math.floor(item.quantity));
+    const already = taken.get(item.id) || new Set();
+    const likers = (likersByItem.get(item.id) || []).filter((u) => !already.has(u));
+    const qty = Math.max(0, Math.floor(item.quantity) - already.size);
     if (likers.length <= qty) {
       for (const userId of likers) give(item.id, userId);
     } else if (qty > 0) {

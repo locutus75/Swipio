@@ -61,3 +61,27 @@ test('is deterministic for the same seed', () => {
   const b = allocate({ items, likes, seed: 'same' });
   assert.deepEqual(a, b);
 });
+
+test('fixed allocations keep their units and count towards fairness', () => {
+  const items = [{ id: 1, quantity: 1 }, { id: 2, quantity: 2 }];
+  const likes = [
+    { itemId: 1, userId: 1 },
+    { itemId: 1, userId: 2 },
+    { itemId: 2, userId: 1 },
+    { itemId: 2, userId: 2 },
+    { itemId: 2, userId: 3 },
+  ];
+  // User 1 already picked up item 1, and one unit of item 2 went to user 3.
+  const fixed = [{ itemId: 1, userId: 1 }, { itemId: 2, userId: 3 }];
+  const result = allocate({ items, likes, seed: 'x', fixed });
+  // Item 1 has no units left. Item 2 has one left; user 2 has nothing yet, so it goes to them.
+  assert.deepEqual(result, [{ itemId: 2, userId: 2 }]);
+});
+
+test('a different seed can change who wins a tie', () => {
+  const items = [{ id: 1, quantity: 1 }];
+  const likes = [1, 2, 3, 4, 5, 6, 7, 8].map((u) => ({ itemId: 1, userId: u }));
+  const winners = new Set();
+  for (let round = 0; round < 20; round++) winners.add(allocate({ items, likes, seed: `1:0:${round}` })[0].userId);
+  assert.ok(winners.size > 1, 'redoing with a new round should be able to pick someone else');
+});

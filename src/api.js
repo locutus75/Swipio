@@ -41,9 +41,11 @@ export function createApi({ now = Date.now } = {}) {
   const all = async (db, sql, ...args) => (await db.prepare(sql).bind(...args).all()).results;
   const run = (db, sql, ...args) => db.prepare(sql).bind(...args).run();
 
-  async function finalizeCollection(db, collectionId) {
-    const c = await first(db, 'SELECT * FROM collections WHERE id = ?', collectionId);
-    if (!c || c.finalized_at !== null) return;
+  // The draw is seeded so results are reproducible; an admin's redo bumps the round for a fresh draw.
+  const seedFor = (c, round = c.allocation_round || 0) => (round ? `${c.id}:${c.expires_at}:${round}` : `${c.id}:${c.expires_at}`);
+
+  /** Items and the likes of current members: the input for an allocation. */
+  async function allocationInput(db, collectionId) {
     const items = await all(db, 'SELECT id, quantity FROM items WHERE collection_id = ?', collectionId);
     const likes = await all(
       db,
@@ -55,11 +57,18 @@ export function createApi({ now = Date.now } = {}) {
         ORDER BY s.created_at`,
       collectionId
     );
+    return { items, likes };
+  }
+
+  async function finalizeCollection(db, collectionId) {
+    const c = await first(db, 'SELECT * FROM collections WHERE id = ?', collectionId);
+    if (!c || c.finalized_at !== null) return;
+    const { items, likes } = await allocationInput(db, collectionId);
     // D1 has no interactive transactions, but a batch is atomic. The result is deterministic
     // (seeded), so INSERT OR IGNORE makes a concurrent finalization of the same collection harmless.
     const insert = db.prepare('INSERT OR IGNORE INTO allocations (item_id, user_id) VALUES (?, ?)');
     await db.batch([
-      ...allocate({ items, likes, seed: `${c.id}:${c.expires_at}` }).map((a) => insert.bind(a.itemId, a.userId)),
+      ...allocate({ items, likes, seed: seedFor(c) }).map((a) => insert.bind(a.itemId, a.userId)),
       db.prepare('UPDATE collections SET finalized_at = ? WHERE id = ? AND finalized_at IS NULL').bind(now(), collectionId),
     ]);
   }
@@ -242,8 +251,10 @@ export function createApi({ now = Date.now } = {}) {
       return Object.fromEntries(form.entries());
     }
     if (!type.includes('application/json')) return {};
+    const text = await req.text();
+    if (!text.trim()) return {}; // a JSON header with an empty body just means "no options"
     try {
-      return (await req.json()) || {};
+      return JSON.parse(text) || {};
     } catch {
       throw new HttpError(400, 'Invalid JSON');
     }
@@ -622,6 +633,7 @@ export function createApi({ now = Date.now } = {}) {
       seeChoices,
       createdBy: creator ? { id: creator.id, name: creator.name } : null,
       editors,
+      allocationRound: c.allocation_round || 0,
       canDelete: seeChoices || c.created_by === ctx.user.id,
       canManageEditors: seeChoices,
       items: items.map((i) => ({ ...serializeItem(i), likes: i.likes, passes: i.passes, allocated: i.allocated })),
@@ -675,6 +687,36 @@ export function createApi({ now = Date.now } = {}) {
     if (c.expires_at > now()) await run(db, 'UPDATE collections SET expires_at = ? WHERE id = ?', now(), c.id);
     await finalizeCollection(db, c.id);
     return { collection: serializeCollection(await getCollection(db, c.id)) };
+  });
+
+  // Admins can throw away a collection's allocation and draw a new one. Items already picked up
+  // stay with their person unless keepCollected is false.
+  route('POST', '/api/admin/collections/:id/reallocate', { role: 'admin' }, async ({ db, params, body }) => {
+    const c = await getCollection(db, params.id);
+    if (c.finalized_at === null) throw new HttpError(409, 'This collection has not been allocated yet');
+    const keepCollected = body.keepCollected !== false;
+    const kept = keepCollected
+      ? await all(
+          db,
+          `SELECT a.item_id AS itemId, a.user_id AS userId FROM allocations a JOIN items i ON i.id = a.item_id
+            WHERE i.collection_id = ? AND a.collected_at IS NOT NULL`,
+          c.id
+        )
+      : [];
+    const { items, likes } = await allocationInput(db, c.id);
+    const round = (c.allocation_round || 0) + 1;
+    const fresh = allocate({ items, likes, seed: seedFor(c, round), fixed: kept });
+    const insert = db.prepare('INSERT OR IGNORE INTO allocations (item_id, user_id) VALUES (?, ?)');
+    await db.batch([
+      db
+        .prepare(
+          `DELETE FROM allocations WHERE item_id IN (SELECT id FROM items WHERE collection_id = ?)${keepCollected ? ' AND collected_at IS NULL' : ''}`
+        )
+        .bind(c.id),
+      ...fresh.map((a) => insert.bind(a.itemId, a.userId)),
+      db.prepare('UPDATE collections SET allocation_round = ?, finalized_at = ? WHERE id = ?').bind(round, now(), c.id),
+    ]);
+    return { collection: serializeCollection(await getCollection(db, c.id)), round, kept: kept.length, allocated: fresh.length };
   });
 
   route('DELETE', '/api/admin/collections/:id', { role: 'creator' }, async (ctx) => {

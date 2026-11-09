@@ -1703,6 +1703,31 @@ async function viewAdminCollection(id, tab) {
     );
   };
 
+  // Admins: throw away the allocation and draw again (likes and participants as they are now).
+  function openReallocateSheet() {
+    // Counted now, not when the tab was drawn: pickups may have been ticked since.
+    const collected = data.allocations.filter((a) => a.collected).length;
+    const keep = h('input', { type: 'checkbox', name: 'keep', checked: true });
+    const form = h(
+      'form',
+      {
+        class: 'stack',
+        onsubmit: action(async (e) => {
+          const r = await api('POST', `/api/admin/collections/${id}/reallocate`, { keepCollected: collected ? keep.checked : true });
+          dlg.close();
+          toast(r.kept ? `New allocation done. ${plural(r.kept, 'picked-up item')} stayed put.` : 'New allocation done');
+          reopen('results');
+        }),
+      },
+      h('p', {}, 'This removes the current allocation and hands everything out again with a fresh draw. It uses everyone\'s likes and the participant list as they are now.'),
+      h('p', { class: 'muted small' }, 'Participants see their new items straight away. Contested items may go to someone else this time.'),
+      collected > 0 &&
+        h('label', { class: 'check' }, keep, `Keep the ${plural(collected, 'item')} already picked up with their person`),
+      h('button', { class: 'primary block big-btn', type: 'submit' }, 'Redo allocation')
+    );
+    const dlg = openSheet('Redo allocation?', form);
+  }
+
   const renderResultsByPerson = () => {
     const byUser = new Map();
     for (const a of data.allocations) {
@@ -1712,11 +1737,20 @@ async function viewAdminCollection(id, tab) {
     const allocatedCount = new Map();
     data.allocations.forEach((a) => allocatedCount.set(a.itemId, (allocatedCount.get(a.itemId) || 0) + 1));
     const leftovers = data.items.map((i) => ({ ...i, left: i.quantity - (allocatedCount.get(i.id) || 0) })).filter((i) => i.left > 0);
-    const collected = data.allocations.filter((a) => a.collected).length;
+    const summary = () =>
+      `${plural(data.allocations.length, 'item')} allocated · ${data.allocations.filter((a) => a.collected).length} collected. Tick items off as people pick them up.`;
+    const counter = h('p', { class: 'muted' }, summary());
     return h(
       'div',
       {},
-      h('p', { class: 'muted' }, `${plural(data.allocations.length, 'item')} allocated · ${collected} collected. Tick items off as people pick them up.`),
+      counter,
+      can('admin') &&
+        h(
+          'div',
+          { class: 'row spread', style: { marginBottom: '12px' } },
+          h('span', { class: 'muted small' }, data.allocationRound ? `Allocation redone ${data.allocationRound}×` : ''),
+          h('button', { onclick: () => openReallocateSheet() }, '🔀 Redo allocation')
+        ),
       byUser.size
         ? h(
             'div',
@@ -1736,6 +1770,7 @@ async function viewAdminCollection(id, tab) {
                       onchange: action(async (e) => {
                         await api('PATCH', `/api/admin/allocations/${a.id}`, { collected: e.target.checked });
                         a.collected = e.target.checked;
+                        counter.textContent = summary();
                       }),
                     }),
                     h('span', { class: 'grow' }, a.itemTitle)
