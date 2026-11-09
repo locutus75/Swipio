@@ -690,13 +690,15 @@ export function createApi({ now = Date.now } = {}) {
     const collectionIds = Array.isArray(body.collectionIds) ? [...new Set(body.collectionIds.map(Number))] : [];
     if (!isAdmin(ctx.user) && !collectionIds.length) throw new HttpError(400, 'Invite people from one of your collections');
     for (const cid of collectionIds) await managedCollection(ctx, cid);
-    const add = db.prepare('INSERT OR IGNORE INTO collection_members (collection_id, user_id) VALUES (?, ?)');
+    const addMember = db.prepare('INSERT OR IGNORE INTO collection_members (collection_id, user_id) VALUES (?, ?)');
+    const addPerson = db.prepare('INSERT OR IGNORE INTO collection_people (collection_id, user_id) VALUES (?, ?)');
+    const add = (cid, uid) => [addMember.bind(cid, uid), addPerson.bind(cid, uid)];
 
     const existing = await first(db, 'SELECT * FROM users WHERE email = ?', email);
     if (existing) {
       if (!collectionIds.length) throw new HttpError(409, 'A user with this email already exists');
       if (existing.access_role === 'admin') throw new HttpError(400, `${existing.name} is an admin. Admins manage the platform and don't take part in collections.`);
-      await db.batch(collectionIds.map((cid) => add.bind(cid, existing.id)));
+      await db.batch(collectionIds.flatMap((cid) => add(cid, existing.id)));
       return [200, { user: userFor(ctx, existing), existing: true }];
     }
     const user = await first(
@@ -712,7 +714,7 @@ export function createApi({ now = Date.now } = {}) {
       ctx.user.id,
       now()
     );
-    if (collectionIds.length && role !== 'admin') await db.batch(collectionIds.map((cid) => add.bind(cid, user.id)));
+    if (collectionIds.length && role !== 'admin') await db.batch(collectionIds.flatMap((cid) => add(cid, user.id)));
     return [201, { user: userFor(ctx, user), existing: false }];
   });
 
@@ -736,6 +738,7 @@ export function createApi({ now = Date.now } = {}) {
       // Admins don't take part in collections (they can manage all of them anyway).
       stmts.push(ctx.db.prepare('DELETE FROM collection_members WHERE user_id = ?').bind(user.id));
       stmts.push(ctx.db.prepare('DELETE FROM collection_editors WHERE user_id = ?').bind(user.id));
+      stmts.push(ctx.db.prepare('DELETE FROM collection_people WHERE user_id = ?').bind(user.id));
     }
     await ctx.db.batch(stmts);
     return { user: adminUser({ ...user, name, access_role: role, blocked_at: blockedAt }) };
@@ -817,6 +820,12 @@ export function createApi({ now = Date.now } = {}) {
     const c = await managedCollection(ctx, ctx.params.id);
     const seeChoices = true; // owners and co-managers see who chose what
     const ownerRights = ctx.access !== 'editor';
+    const people = await all(
+      db,
+      `SELECT u.* FROM collection_people p JOIN users u ON u.id = p.user_id
+        WHERE p.collection_id = ? AND u.access_role != 'admin' ORDER BY u.name COLLATE NOCASE`,
+      c.id
+    );
     const [items, members, allocations, swipes, editors, creator, exclusions] = await Promise.all([
       all(
         db,
@@ -890,6 +899,7 @@ export function createApi({ now = Date.now } = {}) {
         swiped: u.swiped,
         canLike: !editors.some((e) => e.id === u.id && e.can_like === 0),
       })),
+      people: people.map((u) => userFor(ctx, u)),
       choices: swipes.map((s) => ({ userId: s.user_id, itemId: s.item_id, liked: !!s.liked })),
       allocations: (seeChoices ? allocations : []).map((a) => ({
         id: a.id,
@@ -1157,6 +1167,14 @@ export function createApi({ now = Date.now } = {}) {
       const u = await first(db, 'SELECT access_role FROM users WHERE id = ?', id);
       if (!u) throw new HttpError(400, `Unknown user ${id}`);
       if (u.access_role === 'admin') throw new HttpError(400, "Admins can't take part in collections");
+      const invited = await first(
+        db,
+        `SELECT 1 AS ok FROM collection_people WHERE collection_id = ?1 AND user_id = ?2
+         UNION SELECT 1 FROM collection_members WHERE collection_id = ?1 AND user_id = ?2`,
+        c.id,
+        id
+      );
+      if (!invited) throw new HttpError(400, 'Invite this person to the collection first');
     }
     const add = db.prepare('INSERT INTO collection_members (collection_id, user_id) VALUES (?, ?)');
     await db.batch([
@@ -1164,6 +1182,20 @@ export function createApi({ now = Date.now } = {}) {
       ...ids.map((id) => add.bind(c.id, id)),
     ]);
     return { ok: true, userIds: ids };
+  });
+
+  // Take someone off the collection's People list altogether (and out of the participants).
+  route('DELETE', '/api/admin/collections/:id/people/:userId', { auth: true }, async (ctx) => {
+    const { db, params } = ctx;
+    const c = await managedCollection(ctx, params.id);
+    const userId = Number(params.userId);
+    if (userId === c.created_by) throw new HttpError(400, 'The maker of the collection cannot be removed');
+    await db.batch([
+      db.prepare('DELETE FROM collection_people WHERE collection_id = ? AND user_id = ?').bind(c.id, userId),
+      db.prepare('DELETE FROM collection_members WHERE collection_id = ? AND user_id = ?').bind(c.id, userId),
+      db.prepare('DELETE FROM collection_editors WHERE collection_id = ? AND user_id = ?').bind(c.id, userId),
+    ]);
+    return { ok: true };
   });
 
   // The owner (or an admin) chooses which participants may co-manage this collection.

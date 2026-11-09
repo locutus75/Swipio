@@ -237,3 +237,28 @@ test('admins never take part in collections', async () => {
   const d = (await w.admin('GET', `/api/admin/collections/${cid}`)).data;
   assert.deepEqual([d.members, d.editors], [[], []]);
 });
+
+test("a collection's People list only holds people invited to it", async () => {
+  const w = await world();
+  const { cid } = await annasCollection(w);
+  const other = (await w.anna.c('POST', '/api/admin/collections', { name: 'Other', expiresAt: w.srv.now() + HOUR })).data.collection.id;
+  await w.anna.c('POST', '/api/admin/users', { name: 'Cleo', email: 'cleo@example.com', collectionIds: [other] });
+  const cleoId = (await w.anna.c('GET', '/api/admin/users')).data.users.find((u) => u.name === 'Cleo').id;
+  // Cleo was invited to Anna's other collection, so she's not listed here and can't be ticked
+  let d = (await w.anna.c('GET', `/api/admin/collections/${cid}`)).data;
+  assert.deepEqual(d.people, []);
+  assert.equal((await w.anna.c('PUT', `/api/admin/collections/${cid}/members`, { userIds: [cleoId] })).status, 400);
+  assert.equal((await w.admin('PUT', `/api/admin/collections/${cid}/members`, { userIds: [cleoId] })).status, 400, 'admins neither');
+  // Invited: listed, and stays listed when unticked
+  await w.anna.c('POST', '/api/admin/users', { name: 'Cleo', email: 'cleo@example.com', collectionIds: [cid] });
+  await w.anna.c('PUT', `/api/admin/collections/${cid}/members`, { userIds: [] });
+  d = (await w.anna.c('GET', `/api/admin/collections/${cid}`)).data;
+  assert.deepEqual([d.people.map((p) => p.name), d.members], [['Cleo'], []]);
+  assert.equal((await w.anna.c('PUT', `/api/admin/collections/${cid}/members`, { userIds: [cleoId] })).status, 200);
+  // Taken off the list: out of the participants too, and can't be ticked again without an invite
+  assert.equal((await w.anna.c('DELETE', `/api/admin/collections/${cid}/people/${cleoId}`)).status, 200);
+  d = (await w.anna.c('GET', `/api/admin/collections/${cid}`)).data;
+  assert.deepEqual([d.people, d.members], [[], []]);
+  assert.equal((await w.anna.c('PUT', `/api/admin/collections/${cid}/members`, { userIds: [cleoId] })).status, 400);
+  assert.equal((await w.bob.c('DELETE', `/api/admin/collections/${cid}/people/${cleoId}`)).status, 404);
+});

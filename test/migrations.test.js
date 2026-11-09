@@ -33,7 +33,7 @@ test('0002_roles upgrades an existing database without losing data', () => {
 test('later migrations apply on top of 0002', () => {
   const db = new DatabaseSync(':memory:');
   db.exec('PRAGMA foreign_keys = ON;');
-  for (const f of ['0001_init.sql', '0002_roles.sql', '0003_collection_editors.sql', '0004_allocation_round.sql', '0005_allocation_exclusions.sql', '0006_item_groups.sql', '0007_allocation_versions.sql', '0008_open_signup.sql', '0009_editor_can_like.sql', '0010_admins_not_participants.sql']) db.exec(sql(f));
+  for (const f of ['0001_init.sql', '0002_roles.sql', '0003_collection_editors.sql', '0004_allocation_round.sql', '0005_allocation_exclusions.sql', '0006_item_groups.sql', '0007_allocation_versions.sql', '0008_open_signup.sql', '0009_editor_can_like.sql', '0010_admins_not_participants.sql', '0011_collection_people.sql']) db.exec(sql(f));
   db.exec(`
     INSERT INTO users (id, name, email, created_at) VALUES (1, 'Cas', 'cas@x', 0);
     INSERT INTO collections (id, name, expires_at, created_at) VALUES (1, 'C', 0, 0);
@@ -59,4 +59,25 @@ test('0008_open_signup turns participants and managers into regular users', () =
   );
   db.exec('UPDATE users SET invited_by = 1, blocked_at = 5 WHERE id = 4; DELETE FROM users WHERE id = 1;');
   assert.equal(db.prepare('SELECT invited_by FROM users WHERE id = 4').get().invited_by, null, 'inviter deleted → SET NULL');
+});
+
+test('0011_collection_people backfills participants, swipers and item holders, but not admins', () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec('PRAGMA foreign_keys = ON;');
+  for (const f of fs.readdirSync(new URL('../migrations/', import.meta.url)).sort()) {
+    if (f >= '0011') continue;
+    db.exec(sql(f));
+  }
+  db.exec(`
+    INSERT INTO users (id, name, email, access_role, created_at) VALUES
+      (1, 'Ada', 'a@x', 'admin', 0), (2, 'Pim', 'p@x', 'creator', 0), (3, 'Eg', 'e@x', 'creator', 0),
+      (4, 'Jan', 'j@x', 'creator', 0), (5, 'Guz', 'g@x', 'creator', 0);
+    INSERT INTO collections (id, name, expires_at, created_at) VALUES (1, 'C', 0, 0);
+    INSERT INTO items (id, collection_id, title, created_at) VALUES (1, 1, 'Lamp', 0);
+    INSERT INTO collection_members (collection_id, user_id) VALUES (1, 2);
+    INSERT INTO swipes (user_id, item_id, liked, created_at) VALUES (3, 1, 1, 0), (1, 1, 1, 0);
+    INSERT INTO allocations (item_id, user_id) VALUES (1, 4);
+  `);
+  db.exec(sql('0011_collection_people.sql'));
+  assert.deepEqual(db.prepare('SELECT user_id FROM collection_people ORDER BY user_id').all().map((r) => r.user_id), [2, 3, 4]);
 });

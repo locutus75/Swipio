@@ -26,6 +26,8 @@ can pick up.
   (the collection isn't in their swipe list and their likes don't count in the allocation)
 - Invite people by name and email. Someone who already has an account is added straight away;
   anyone else gets an invite link to copy, email or share, and sets their own password
+- A collection's **People** tab lists only the people invited to that collection. Tick who may swipe;
+  unticked people stay listed, and **✕** takes someone off the list (they need a new invite to come back)
 - **Admins** run the platform: they see and can manage every collection, and manage all accounts
   under *Manage → People* (make someone admin, reset a password, **block** or delete an account).
   The first account is the admin. Admins never take part in collections themselves: they can't be

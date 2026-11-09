@@ -1306,9 +1306,9 @@ window.addEventListener('beforeunload', (e) => {
 // ---------------------------------------------------------------------------
 
 async function viewAdminCollection(id, tab) {
-  const [data, { users: allUsers }] = await Promise.all([api('GET', `/api/admin/collections/${id}`), api('GET', '/api/admin/users')]);
-  // Admins run the platform and never take part in collections, so they can't be ticked here.
-  const users = allUsers.filter((u) => u.role !== 'admin');
+  const data = await api('GET', `/api/admin/collections/${id}`);
+  // Only people invited to this collection (admins never take part, so they aren't listed).
+  const users = [...data.people, ...data.members.filter((m) => !data.people.some((p) => p.id === m.id))];
   const c = data.collection;
   const canAddItems = c.state !== 'closed';
   const tabs = [
@@ -1818,7 +1818,7 @@ async function viewAdminCollection(id, tab) {
             reopen('people');
           }),
         },
-        h('p', { class: 'muted small', style: { marginTop: 0 } }, 'Tick who can swipe on this collection.'),
+        h('p', { class: 'muted small', style: { marginTop: 0 } }, 'Everyone invited to this collection. Tick who can swipe on it; ✕ takes someone off this list.'),
         users.length
           ? users.map((u) =>
               h(
@@ -1838,7 +1838,20 @@ async function viewAdminCollection(id, tab) {
                     title: 'See what they chose',
                     onclick: (e) => { e.preventDefault(); openChoicesSheet(data.members.find((m) => m.id === u.id)); },
                   }, `♥ ${choicesOf(u.id).filter((c) => c.liked).length} · ${swipedBy.get(u.id)}/${data.items.length}`),
-                u.status === 'invited' && u.inviteToken && h('button', { type: 'button', 'aria-label': 'Invite link', onclick: (e) => { e.preventDefault(); inviteDialog(u); } }, '✉️')
+                u.status === 'invited' && u.inviteToken && h('button', { type: 'button', 'aria-label': 'Invite link', onclick: (e) => { e.preventDefault(); inviteDialog(u); } }, '✉️'),
+                !memberIds.has(u.id) &&
+                  h('button', {
+                    type: 'button',
+                    class: 'icon-btn ghost',
+                    title: 'Take off this list',
+                    'aria-label': `Take ${u.name} off this list`,
+                    onclick: action(async (e) => {
+                      e.preventDefault();
+                      if (!(await confirmDialog(`${u.name} is no longer listed here. To add them again, invite them from this collection.`, { title: `Take ${u.name} off the list?`, confirmLabel: 'Take off' }))) return;
+                      await api('DELETE', `/api/admin/collections/${id}/people/${u.id}`);
+                      reopen('people');
+                    }),
+                  }, '✕')
               )
             )
           : h('p', { class: 'muted' }, 'No people yet. Invite someone below.'),

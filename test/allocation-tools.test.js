@@ -2,6 +2,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { setup, HOUR } from './helpers.js';
 
+/** Invites existing accounts into a collection (only invited people can be ticked as participants). */
+async function invite(t, cid, ids) {
+  const { users } = (await t.admin('GET', '/api/admin/users')).data;
+  for (const id of ids) {
+    const u = users.find((x) => x.id === id);
+    await t.admin('POST', '/api/admin/users', { name: u.name, email: u.email, collectionIds: [cid] });
+  }
+}
+
 /** Creates an admin plus a few signed-in regular users. */
 async function team() {
   const srv = setup();
@@ -36,6 +45,7 @@ test('admins can redo an allocation; picked-up items stay put by default', async
     await c('POST', `/api/invites/${d.user.inviteToken}`, { password: 'olepassword' });
     return { client: c, id: d.user.id };
   })();
+  await invite(t, cid, [t.participant.id, p2.id]);
   await t.admin('PUT', `/api/admin/collections/${cid}/members`, { userIds: [t.participant.id, p2.id] });
   for (const id of ids) {
     await t.participant.client('PUT', `/api/items/${id}/swipe`, { liked: true });
@@ -94,6 +104,7 @@ test('admins can take items away from someone and hand them to others', async ()
     await c('POST', `/api/invites/${d.user.inviteToken}`, { password: 'olepassword' });
     return { client: c, id: d.user.id };
   })();
+  await invite(t, cid, [t.participant.id, ole.id]);
   await t.admin('PUT', `/api/admin/collections/${cid}/members`, { userIds: [t.participant.id, ole.id] });
   // Pim wants both; Ole only wants the bike.
   await t.participant.client('PUT', `/api/items/${bike.id}/swipe`, { liked: true });
@@ -151,6 +162,7 @@ test('admins can change a participant\'s likes, also after closing', async () =>
   const { data } = await t.admin('POST', '/api/admin/collections', { name: 'Likes', expiresAt: t.srv.now() + HOUR, published: true });
   const cid = data.collection.id;
   const lamp = (await t.admin('POST', `/api/admin/collections/${cid}/items`, { title: 'Lamp' })).data.item;
+  await invite(t, cid, [t.participant.id]);
   await t.admin('PUT', `/api/admin/collections/${cid}/members`, { userIds: [t.participant.id] });
   await t.admin('POST', `/api/admin/collections/${cid}/close`);
   const choices = async () => (await t.admin('GET', `/api/admin/collections/${cid}`)).data.choices;
@@ -180,6 +192,7 @@ test('allocation versions: saved before changes, restorable, exportable and impo
   const cid = data.collection.id;
   const bike = (await t.admin('POST', `/api/admin/collections/${cid}/items`, { title: 'Bike' })).data.item;
   const lamp = (await t.admin('POST', `/api/admin/collections/${cid}/items`, { title: 'Lamp' })).data.item;
+  await invite(t, cid, [t.participant.id]);
   await t.admin('PUT', `/api/admin/collections/${cid}/members`, { userIds: [t.participant.id] });
   for (const it of [bike, lamp]) await t.participant.client('PUT', `/api/items/${it.id}/swipe`, { liked: true });
 
@@ -263,6 +276,7 @@ test('admins can reset an allocation completely, and undo it', async () => {
   const { data } = await t.admin('POST', '/api/admin/collections', { name: 'Reset', expiresAt: t.srv.now() + HOUR, published: true });
   const cid = data.collection.id;
   const bike = (await t.admin('POST', `/api/admin/collections/${cid}/items`, { title: 'Bike' })).data.item;
+  await invite(t, cid, [t.participant.id]);
   await t.admin('PUT', `/api/admin/collections/${cid}/members`, { userIds: [t.participant.id] });
   await t.participant.client('PUT', `/api/items/${bike.id}/swipe`, { liked: true });
   assert.equal((await t.admin('POST', `/api/admin/collections/${cid}/allocation/reset`)).status, 409, 'not allocated yet');
