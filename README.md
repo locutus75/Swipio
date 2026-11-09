@@ -67,6 +67,10 @@ When a collection closes:
 Both use everyone's likes and the participant list as they are now. Take-aways only steer the next
 hand-out: once items are handed out again (or the collection is re-opened) they are forgotten.
 
+- **Duplicates warning**: if someone holds more than one item of the same product (e.g. from an
+  older allocation, picked-up items, or a restored version), a warning lists it with a
+  *Keep one, free the rest* button. The Items tab flags items whose name mentions a group they're
+  not in (*Group Dopper?*).
 - **Versions**: before every change above (and before a restore or import) the allocation is saved
   automatically; the newest 30 per collection are kept under *Versions* on the Results tab. **Restore**
   puts one back (including pickup status and take-aways). **⬇ Export** downloads the current

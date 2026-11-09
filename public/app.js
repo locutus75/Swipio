@@ -1286,6 +1286,14 @@ async function viewAdminCollection(id, tab) {
   // --- items ---
   const itemsList = h('div', {});
 
+  /** An existing group the item's name mentions while the item isn't in it (e.g. a forgotten Dopper). */
+  function suggestedGroup(item) {
+    const name = item.title.toLowerCase();
+    const groups = [...new Set(data.items.map((i) => i.group).filter(Boolean))];
+    const words = name.split(/[^\p{L}\p{N}]+/u);
+    return groups.find((g) => (g.includes(' ') ? name.includes(g.toLowerCase()) : words.includes(g.toLowerCase()))) || null;
+  }
+
   function drawItems() {
     const pending = uploads.entries.filter((e) => e.collectionId === Number(id));
     const pendingRow = (e) =>
@@ -1313,7 +1321,15 @@ async function viewAdminCollection(id, tab) {
           'div',
           { class: 'grow' },
           h('div', { class: 'name' }, item.title),
-          h('div', { class: 'muted small' }, `${item.quantity} available · ♥ ${item.likes} · ✕ ${item.passes}`, item.group && ' ', item.group && h('span', { class: 'badge' }, `Group: ${item.group}`))
+          h(
+            'div',
+            { class: 'muted small' },
+            `${item.quantity} available · ♥ ${item.likes} · ✕ ${item.passes}`,
+            item.group && ' ',
+            item.group && h('span', { class: 'badge' }, `Group: ${item.group}`),
+            !item.group && suggestedGroup(item) && ' ',
+            !item.group && suggestedGroup(item) && h('span', { class: 'badge closed', title: 'The name mentions this group, but the item is not in it' }, `Group ${suggestedGroup(item)}?`)
+          )
         ),
         h('span', { class: 'chev', 'aria-hidden': 'true' }, '›')
       );
@@ -1941,6 +1957,61 @@ async function viewAdminCollection(id, tab) {
       `${plural(data.allocations.length, 'item')} allocated · ${data.allocations.filter((a) => a.collected).length} collected. Tick items off as people pick them up.`;
     const counter = h('p', { class: 'muted' }, summary());
 
+    // People holding more than one item of the same product (same group, or same name). The
+    // allocation never does this, but older allocations, picked-up items or a restored version can.
+    const itemById = new Map(data.items.map((i) => [i.id, i]));
+    const productOf = (itemId) => {
+      const item = itemById.get(itemId);
+      return item ? productKey(item.group || item.title) : `#${itemId}`;
+    };
+    const productLabel = (itemId) => {
+      const item = itemById.get(itemId);
+      return item ? item.group || item.title : '?';
+    };
+    const duplicates = [];
+    for (const [userId, g] of byUser) {
+      const perProduct = new Map();
+      for (const a of g.list) {
+        const key = productOf(a.itemId);
+        if (!perProduct.has(key)) perProduct.set(key, []);
+        perProduct.get(key).push(a);
+      }
+      for (const list of perProduct.values()) if (list.length > 1) duplicates.push({ userId, name: g.name, list });
+    }
+    const duplicateIds = new Set(duplicates.flatMap((d) => d.list.map((a) => a.id)));
+
+    // Keep one per product (a picked-up one if there is one), free the others.
+    const fixDuplicates = action(async () => {
+      const extra = duplicates.flatMap((d) => {
+        const keep = d.list.find((a) => a.collected) || d.list[0];
+        return d.list.filter((a) => a !== keep);
+      });
+      const ok = await confirmDialog(
+        `${plural(extra.length, 'item')} ${extra.length === 1 ? 'is' : 'are'} taken away so everyone keeps one of each product (a picked-up one is kept if there is one). Then use "Hand out free items" to give them to others. A version is saved first.`,
+        { title: 'Keep one, free the rest?', confirmLabel: 'Free the extras' }
+      );
+      if (!ok) return;
+      await api('POST', `/api/admin/collections/${id}/release`, { allocationIds: extra.map((a) => a.id) });
+      toast(`${plural(extra.length, 'item')} freed. Use "Hand out free items" to give them to others.`);
+      reopen('results');
+    });
+
+    const duplicateWarning =
+      duplicates.length > 0 &&
+      h(
+        'div',
+        { class: 'card warning-card stack' },
+        h('strong', {}, '⚠ Someone has more than one of the same product'),
+        h(
+          'div',
+          { class: 'small' },
+          duplicates.map((d) =>
+            h('div', {}, `${d.name}: ${d.list.length}× ${productLabel(d.list[0].itemId)}`, h('span', { class: 'muted' }, ` (${d.list.map((a) => a.itemTitle).join(' / ')})`))
+          )
+        ),
+        isAdmin && h('button', { class: 'primary', onclick: fixDuplicates }, 'Keep one, free the rest')
+      );
+
     const allocationRow = (a, g) =>
       h(
         'div',
@@ -1957,7 +2028,7 @@ async function viewAdminCollection(id, tab) {
               counter.textContent = summary();
             }),
           }),
-          h('span', {}, a.itemTitle)
+          h('span', {}, a.itemTitle, duplicateIds.has(a.id) && ' ', duplicateIds.has(a.id) && h('span', { class: 'badge closed' }, `2+ of ${productLabel(a.itemId)}`))
         ),
         isAdmin &&
           h('button', {
@@ -1988,6 +2059,7 @@ async function viewAdminCollection(id, tab) {
       'div',
       {},
       counter,
+      duplicateWarning,
       isAdmin &&
         h(
           'div',
