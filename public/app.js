@@ -1722,7 +1722,7 @@ async function viewAdminCollection(id, tab) {
         { class: 'stack' },
         summary,
         c.state === 'closed' &&
-          h('p', { class: 'small' }, 'This collection is closed: changes count from the next "Hand out again" on the Results tab.'),
+          h('p', { class: 'small' }, 'This collection is closed: changes count from the next "Hand out" on the Results tab.'),
         h('div', { class: 'card' }, data.items.map(row))
       ),
       { onClose: () => changed && reopen(current) }
@@ -1928,8 +1928,21 @@ async function viewAdminCollection(id, tab) {
     const syncKeep = () => keepRow && (keepRow.style.display = form.querySelector('input[name=mode]:checked').value === 'free' ? 'none' : '');
     form.addEventListener('change', syncKeep);
     syncKeep();
-    const dlg = openSheet('Hand out again', form);
+    const dlg = openSheet('Hand out', form);
   }
+
+  // Admins: remove the whole allocation. Saved as a version first, so it can be undone.
+  const resetAllocation = action(async () => {
+    const collected = data.allocations.filter((a) => a.collected).length;
+    const ok = await confirmDialog(
+      `All ${plural(data.allocations.length, 'allocated item')} are removed${collected ? `, including ${collected} marked as picked up` : ''}, and nobody has anything anymore. You can then use "Hand out" or reopen the collection. A version is saved first, so you can go back.`,
+      { title: 'Reset the allocation?', confirmLabel: 'Reset', danger: true }
+    );
+    if (!ok) return;
+    const r = await api('POST', `/api/admin/collections/${id}/allocation/reset`);
+    toast(`Allocation reset: ${plural(r.removed, 'item')} removed`);
+    reopen('results');
+  });
 
   // Admins: take items away from someone. The units become free for others.
   const takeAway = (allocations, title, name) =>
@@ -2097,7 +2110,12 @@ async function viewAdminCollection(id, tab) {
           'div',
           { class: 'row spread', style: { marginBottom: '12px' } },
           h('span', { class: 'muted small' }, data.allocationRound ? `Allocation redone ${data.allocationRound}×` : ''),
-          h('button', { onclick: () => openReallocateSheet({ onlyFree: data.removed.length > 0 }) }, '🔀 Hand out again')
+          h(
+            'div',
+            { class: 'row' },
+            h('button', { class: 'danger', onclick: resetAllocation }, '↺ Reset'),
+            h('button', { onclick: () => openReallocateSheet({ onlyFree: data.removed.length > 0 }) }, '🔀 Hand out')
+          )
         ),
       byUser.size
         ? h(
@@ -2247,7 +2265,7 @@ async function viewAdminCollection(id, tab) {
         h('h3', { style: { margin: 0 } }, 'Versions'),
         h('div', { class: 'row' }, h('button', { onclick: exportNow }, '⬇ Export'), h('button', { onclick: importFile }, '⬆ Import'))
       ),
-      h('p', { class: 'muted small' }, 'Before every change (handing out again, taking items away, restoring, importing) the allocation is saved here. The newest 30 are kept.'),
+      h('p', { class: 'muted small' }, 'Before every change (handing out, taking items away, resetting, reopening, restoring, importing) the allocation is saved here. The newest 30 are kept.'),
       list
     );
   }

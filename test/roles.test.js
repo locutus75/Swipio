@@ -472,3 +472,32 @@ test('reopening: only admins and the maker, keeps picked-up items, new items get
   // Admins can reopen any collection
   assert.equal((await t.admin('POST', `/api/admin/collections/${cid}/reopen`, { expiresAt: t.srv.now() + HOUR })).status, 200);
 });
+
+test('admins can reset an allocation completely, and undo it', async () => {
+  const t = await team();
+  const { data } = await t.admin('POST', '/api/admin/collections', { name: 'Reset', expiresAt: t.srv.now() + HOUR, published: true });
+  const cid = data.collection.id;
+  const bike = (await t.admin('POST', `/api/admin/collections/${cid}/items`, { title: 'Bike' })).data.item;
+  await t.admin('PUT', `/api/admin/collections/${cid}/members`, { userIds: [t.participant.id] });
+  await t.participant.client('PUT', `/api/items/${bike.id}/swipe`, { liked: true });
+  assert.equal((await t.admin('POST', `/api/admin/collections/${cid}/allocation/reset`)).status, 409, 'not allocated yet');
+  await t.admin('POST', `/api/admin/collections/${cid}/close`);
+  let d = (await t.admin('GET', `/api/admin/collections/${cid}`)).data;
+  await t.admin('PATCH', `/api/admin/allocations/${d.allocations[0].id}`, { collected: true });
+
+  assert.equal((await t.manager.client('POST', `/api/admin/collections/${cid}/allocation/reset`)).status, 403);
+  const r = await t.admin('POST', `/api/admin/collections/${cid}/allocation/reset`);
+  assert.equal(r.data.removed, 1);
+  d = (await t.admin('GET', `/api/admin/collections/${cid}`)).data;
+  assert.deepEqual(d.allocations, []);
+  assert.equal(d.collection.state, 'closed', 'stays closed');
+  assert.equal((await t.participant.client('GET', `/api/collections/${cid}`)).data.items[0].won, false);
+
+  // Undo via the saved version
+  const v = (await t.admin('GET', `/api/admin/collections/${cid}/allocation/versions`)).data.versions[0];
+  assert.equal(v.label, 'Before reset');
+  await t.admin('POST', `/api/admin/collections/${cid}/allocation/versions/${v.id}/restore`);
+  d = (await t.admin('GET', `/api/admin/collections/${cid}`)).data;
+  assert.equal(d.allocations.length, 1);
+  assert.equal(d.allocations[0].collected, true);
+});

@@ -1017,6 +1017,15 @@ export function createApi({ now = Date.now } = {}) {
     return applySnapshot(db, c, JSON.parse(v.data));
   });
 
+  // Removes the whole allocation (who gets what, pickups and take-aways). A version is saved first.
+  route('POST', '/api/admin/collections/:id/allocation/reset', { role: 'admin' }, async ({ db, params, user }) => {
+    const c = await closedCollection(db, params.id);
+    await saveVersion(db, c, 'Before reset', user.id);
+    const r = await run(db, 'DELETE FROM allocations WHERE item_id IN (SELECT id FROM items WHERE collection_id = ?)', c.id);
+    await run(db, 'DELETE FROM allocation_exclusions WHERE item_id IN (SELECT id FROM items WHERE collection_id = ?)', c.id);
+    return { ok: true, removed: r.meta.changes };
+  });
+
   route('POST', '/api/admin/collections/:id/allocation/import', { role: 'admin' }, async ({ db, params, body, user }) => {
     const c = await closedCollection(db, params.id);
     // Validate before saving a version, so a wrong file changes nothing.

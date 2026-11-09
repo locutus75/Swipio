@@ -60,7 +60,7 @@ When a collection closes:
   *Taken away from Egbert*, *Only liked by someone who no longer participates*, *Nobody wanted this*).
 - **Take items away** from someone (✕ per item, or *Take all away*). The units become free, and
   that person is skipped for those items in any later allocation. *↩ Undo* reverses this.
-- **Hand out again**, in one of two ways:
+- **Hand out**, in one of two ways:
   - *Hand out free items only*: everyone keeps what they have; free and taken-away items go to
     others who wanted them.
   - *Redo everything*: throw the allocation away and draw again. Each redo uses a new round in the
@@ -74,6 +74,8 @@ hand-out: once items are handed out again (or the collection is re-opened) they 
   older allocation, picked-up items, or a restored version), a warning lists it with a
   *Keep one, free the rest* button. The Items tab flags items whose name mentions a group they're
   not in (*Group Dopper?*).
+- **Reset**: removes the whole allocation (who gets what, pickups and take-aways); a version is saved
+  first. Afterwards use *Hand out* or reopen the collection.
 - **Versions**: before every change above (and before a restore or import) the allocation is saved
   automatically; the newest 30 per collection are kept under *Versions* on the Results tab. **Restore**
   puts one back (including pickup status and take-aways). **⬇ Export** downloads the current
@@ -81,7 +83,7 @@ hand-out: once items are handed out again (or the collection is re-opened) they 
   id, or by item name and email if they were re-added, and anything that no longer exists is skipped
   and listed.
 - **Change someone's likes** (People tab → tap the ♥ chip next to a participant): set ♥ or ✕ per item,
-  or tap the active one again to clear it. Works after closing too; the next *Hand out again* uses it.
+  or tap the active one again to clear it. Works after closing too; the next *Hand out* uses it.
 
 See `src/allocation.js`.
 
