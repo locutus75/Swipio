@@ -251,8 +251,8 @@ async function loadImage(file) {
 
 function copy(text) {
   navigator.clipboard
-    ? navigator.clipboard.writeText(text).then(() => toast('Link copied'), () => prompt('Copy this link', text))
-    : prompt('Copy this link', text);
+    ? navigator.clipboard.writeText(text).then(() => toast('Link copied'), () => toast('Could not copy. Press and hold the link to copy it.', 'error'))
+    : toast('Could not copy. Press and hold the link to copy it.', 'error');
 }
 
 function topbar(...right) {
@@ -300,8 +300,30 @@ function mount(...nodes) {
   window.scrollTo(0, 0);
 }
 
-function confirmDialog(message) {
-  return Promise.resolve(window.confirm(message));
+/**
+ * In-app confirmation (instead of the browser's own confirm box). Resolves true when confirmed;
+ * Cancel, Escape or tapping outside resolve false. `danger` makes the confirm button red.
+ */
+function confirmDialog(message, { title = 'Are you sure?', confirmLabel = 'OK', cancelLabel = 'Cancel', danger = false } = {}) {
+  return new Promise((resolve) => {
+    let answer = false;
+    const ok = h('button', { class: danger ? 'danger-fill' : 'primary', type: 'button', onclick: () => ((answer = true), dlg.close()) }, confirmLabel);
+    const dlg = h(
+      'dialog',
+      { class: 'sheet confirm', 'aria-labelledby': 'confirm-title' },
+      h('h2', { id: 'confirm-title' }, title),
+      message && h('p', { class: 'muted' }, message),
+      h('div', { class: 'confirm-actions' }, h('button', { type: 'button', onclick: () => dlg.close() }, cancelLabel), ok)
+    );
+    dlg.addEventListener('click', (e) => e.target === dlg && dlg.close()); // tap outside
+    dlg.addEventListener('close', () => {
+      dlg.remove();
+      resolve(answer);
+    });
+    document.body.append(dlg);
+    dlg.showModal();
+    ok.focus();
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -928,7 +950,7 @@ function openUserSheet(u, onChange) {
       u.status === 'active' &&
       h('button', {
         onclick: action(async () => {
-          if (!(await confirmDialog(`Reset ${u.name}'s password? They will get a new invite link.`))) return;
+          if (!(await confirmDialog(`${u.name} gets a new invite link to set a new password, and is signed out everywhere.`, { title: 'Reset password?', confirmLabel: 'Reset password' }))) return;
           const { user } = await api('POST', `/api/admin/users/${u.id}/invite`);
           dlg.close();
           inviteDialog(user);
@@ -939,7 +961,7 @@ function openUserSheet(u, onChange) {
       h('button', {
         class: 'danger',
         onclick: action(async () => {
-          if (!(await confirmDialog(`Delete ${u.name}? Their swipes and items will be removed.`))) return;
+          if (!(await confirmDialog(`Their swipes and items are removed too. This can't be undone.`, { title: `Delete ${u.name}?`, confirmLabel: 'Delete', danger: true }))) return;
           await api('DELETE', `/api/admin/users/${u.id}`);
           dlg.close();
           onChange();
@@ -1224,14 +1246,14 @@ async function viewAdminCollection(id, tab) {
     const problems = [];
     if (!data.items.length) problems.push('there are no items yet');
     if (!data.members.length) problems.push('nobody has been invited yet');
-    if (problems.length && !(await confirmDialog(`Publish anyway? Note that ${problems.join(' and ')}.`))) return;
+    if (problems.length && !(await confirmDialog(`Note that ${problems.join(' and ')}.`, { title: 'Publish anyway?', confirmLabel: 'Publish' }))) return;
     await api('PATCH', `/api/admin/collections/${id}`, { published: true });
     toast('Published! Invited people can start swiping.');
     reopen();
   });
 
   const closeNow = action(async () => {
-    if (!(await confirmDialog('Close this collection now and allocate the items?'))) return;
+    if (!(await confirmDialog('Swiping stops and the items are handed out straight away.', { title: 'Close this collection now?', confirmLabel: 'Close now' }))) return;
     await api('POST', `/api/admin/collections/${id}/close`);
     reopen('results');
   });
@@ -1428,7 +1450,7 @@ async function viewAdminCollection(id, tab) {
                 type: 'button',
                 class: 'danger',
                 onclick: action(async () => {
-                  if (!(await confirmDialog(`Delete "${item.title}"?`))) return;
+                  if (!(await confirmDialog("This can't be undone.", { title: `Delete "${item.title}"?`, confirmLabel: 'Delete', danger: true }))) return;
                   await api('DELETE', `/api/admin/items/${item.id}`);
                   dlg.close();
                   await reloadItems();
@@ -1649,7 +1671,7 @@ async function viewAdminCollection(id, tab) {
           const f = formData(e.target);
           const expiresAt = new Date(f.expiresAt).getTime();
           if (c.state === 'closed' && expiresAt > Date.now()) {
-            if (!(await confirmDialog('Re-open this collection? Current results and pickup status will be discarded.'))) return;
+            if (!(await confirmDialog('The current results and pickup status will be discarded, and items are handed out again at the new deadline.', { title: 'Re-open this collection?', confirmLabel: 'Re-open', danger: true }))) return;
           }
           await api('PATCH', `/api/admin/collections/${id}`, {
             name: f.name,
@@ -1672,7 +1694,7 @@ async function viewAdminCollection(id, tab) {
           type: 'button',
           class: 'danger',
           onclick: action(async () => {
-            if (!(await confirmDialog(`Delete "${c.name}" with all its items and results?`))) return;
+            if (!(await confirmDialog("All its items, photos and results are removed too. This can't be undone.", { title: `Delete "${c.name}"?`, confirmLabel: 'Delete', danger: true }))) return;
             await api('DELETE', `/api/admin/collections/${id}`);
             go('#/admin');
           }),
@@ -1752,9 +1774,11 @@ async function viewAdminCollection(id, tab) {
   }
 
   // Admins: take items away from someone. The units become free for others.
-  const takeAway = (allocations, label) =>
+  const takeAway = (allocations, title, name) =>
     action(async () => {
-      if (!(await confirmDialog(`${label} It becomes available for others, and they won't get it back in a new allocation.`))) return;
+      const what = allocations.length === 1 ? 'It becomes' : 'They become';
+      const message = `${what} available for others, and ${name} won't get ${allocations.length === 1 ? 'it' : 'them'} back in a new allocation. You can undo this.`;
+      if (!(await confirmDialog(message, { title, confirmLabel: 'Take away', danger: true }))) return;
       await api('POST', `/api/admin/collections/${id}/release`, { allocationIds: allocations.map((a) => a.id) });
       toast('Taken away. Tap "Hand out again" to give it to someone else.');
       reopen('results');
@@ -1799,7 +1823,7 @@ async function viewAdminCollection(id, tab) {
             class: 'ghost icon-btn',
             title: 'Take away',
             'aria-label': `Take ${a.itemTitle} away from ${g.name}`,
-            onclick: takeAway([a], `Take "${a.itemTitle}" away from ${g.name}?`),
+            onclick: takeAway([a], `Take "${a.itemTitle}" away from ${g.name}?`, g.name),
           }, '✕')
       );
 
@@ -1843,7 +1867,7 @@ async function viewAdminCollection(id, tab) {
                   { class: 'row spread' },
                   h('h3', { style: { margin: 0 } }, `${g.name} · ${g.list.length}`),
                   isAdmin && g.list.length > 1 &&
-                    h('button', { class: 'ghost small', onclick: takeAway(g.list, `Take all ${g.list.length} items away from ${g.name}?`) }, 'Take all away')
+                    h('button', { class: 'ghost small', onclick: takeAway(g.list, `Take all ${g.list.length} items away from ${g.name}?`, g.name) }, 'Take all away')
                 ),
                 g.list.map((a) => allocationRow(a, g)),
                 g.removed.length > 0 &&

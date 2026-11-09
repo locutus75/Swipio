@@ -1063,3 +1063,34 @@ body:has(#app.has-action-bar) #toasts {
   text-decoration: line-through;
   text-decoration-color: var(--nope);
 }
+
+/* In-app confirmation */
+dialog.confirm {
+  max-width: 440px;
+  padding-top: 22px;
+}
+
+dialog.confirm h2 {
+  font-size: 1.2rem;
+  margin-bottom: 8px;
+  overflow-wrap: anywhere;
+}
+
+dialog.confirm p {
+  margin: 0 0 20px;
+}
+
+.confirm-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.confirm-actions button {
+  padding: 13px 16px;
+}
+
+.danger-fill {
+  background: var(--nope);
+  color: #fff;
+}
