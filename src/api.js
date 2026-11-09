@@ -739,8 +739,37 @@ export function createApi({ now = Date.now } = {}) {
       ...clear,
       ...fresh.map((a) => insert.bind(a.itemId, a.userId)),
       db.prepare('UPDATE collections SET allocation_round = ?, finalized_at = ? WHERE id = ?').bind(round, now(), c.id),
+      // Take-aways only steer this hand-out; afterwards they're forgotten.
+      db.prepare('DELETE FROM allocation_exclusions WHERE item_id IN (SELECT id FROM items WHERE collection_id = ?)').bind(c.id),
     ]);
     return { collection: serializeCollection(await getCollection(db, c.id)), round, kept: kept.length, allocated: fresh.length };
+  });
+
+  // Admins can change a participant's choices, also after closing. A new hand-out uses them.
+  route('PUT', '/api/admin/collections/:id/choices', { role: 'admin' }, async ({ db, params, body }) => {
+    const c = await getCollection(db, params.id);
+    const userId = Number(body.userId);
+    const itemId = Number(body.itemId);
+    const item = await first(db, 'SELECT id FROM items WHERE id = ? AND collection_id = ?', itemId, c.id);
+    if (!item) throw new HttpError(404, 'Item not found in this collection');
+    const member = await first(db, 'SELECT 1 AS ok FROM collection_members WHERE collection_id = ? AND user_id = ?', c.id, userId);
+    if (!member) throw new HttpError(400, 'That person is not a participant of this collection');
+    if (body.liked === null) {
+      await run(db, 'DELETE FROM swipes WHERE user_id = ? AND item_id = ?', userId, itemId);
+    } else if (typeof body.liked === 'boolean') {
+      await run(
+        db,
+        `INSERT INTO swipes (user_id, item_id, liked, created_at) VALUES (?, ?, ?, ?)
+         ON CONFLICT (user_id, item_id) DO UPDATE SET liked = excluded.liked`,
+        userId,
+        itemId,
+        body.liked ? 1 : 0,
+        now()
+      );
+    } else {
+      throw new HttpError(400, 'liked must be true, false or null');
+    }
+    return { ok: true };
   });
 
   // Admins can take allocated items away from someone. The units become free, and that person

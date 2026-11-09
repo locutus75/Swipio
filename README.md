@@ -62,8 +62,11 @@ When a collection closes:
     random seed, so ties can fall differently. Items already ticked off as picked up stay with
     their person (unless you untick that option) and count towards that person's total.
 
-Both use everyone's likes and the participant list as they are now. Re-opening a collection clears
-any take-aways.
+Both use everyone's likes and the participant list as they are now. Take-aways only steer the next
+hand-out: once items are handed out again (or the collection is re-opened) they are forgotten.
+
+- **Change someone's likes** (People tab → tap the ♥ chip next to a participant): set ♥ or ✕ per item,
+  or tap the active one again to clear it. Works after closing too; the next *Hand out again* uses it.
 
 See `src/allocation.js`.
 

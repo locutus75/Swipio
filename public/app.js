@@ -1549,6 +1549,7 @@ async function viewAdminCollection(id, tab) {
     data.choices.filter((c) => c.itemId === itemId && c.liked).map((c) => data.members.find((m) => m.id === c.userId)?.name).filter(Boolean);
 
   function openChoicesSheet(member) {
+    if (can('admin')) return openChoicesEditor(member);
     const mine = choicesOf(member.id);
     const itemById = new Map(data.items.map((i) => [i.id, i]));
     const list = (liked) =>
@@ -1569,6 +1570,59 @@ async function viewAdminCollection(id, tab) {
         wants.length ? h('div', { class: 'card' }, wants) : h('p', { class: 'muted' }, 'Nothing yet.'),
         passes.length > 0 && h('details', {}, h('summary', { class: 'muted' }, `✕ Passed (${passes.length})`), h('div', { class: 'card' }, passes))
       )
+    );
+  }
+
+  // Admins: change someone's choices item by item (also after closing). Tapping the active
+  // choice again clears it ("not swiped yet").
+  function openChoicesEditor(member) {
+    let changed = false;
+    const choiceOf = (itemId) => data.choices.find((c) => c.userId === member.id && c.itemId === itemId);
+    const summary = h('p', { class: 'muted small' });
+    const drawSummary = () => {
+      const mine = choicesOf(member.id);
+      const wants = mine.filter((c) => c.liked).length;
+      summary.textContent = `${plural(wants, 'item')} wanted · ${mine.length - wants} passed · ${data.items.length - mine.length} not swiped yet`;
+    };
+    const row = (item) => {
+      const current = choiceOf(item.id);
+      const state = current ? (current.liked ? 'like' : 'pass') : null;
+      const set = (liked) =>
+        action(async () => {
+          const next = (liked ? 'like' : 'pass') === state ? null : liked; // tap again to clear
+          await api('PUT', `/api/admin/collections/${id}/choices`, { userId: member.id, itemId: item.id, liked: next });
+          data.choices = data.choices.filter((c) => !(c.userId === member.id && c.itemId === item.id));
+          if (next !== null) data.choices.push({ userId: member.id, itemId: item.id, liked: next });
+          changed = true;
+          el.replaceWith(row(item));
+          drawSummary();
+        });
+      const el = h(
+        'div',
+        { class: 'item-row' },
+        thumb(item),
+        h('div', { class: 'grow' }, h('div', { class: 'name' }, item.title), !state && h('div', { class: 'muted small' }, 'Not swiped yet')),
+        h(
+          'div',
+          { class: 'choice-toggle' },
+          h('button', { class: state === 'pass' ? 'on pass' : '', 'aria-pressed': String(state === 'pass'), onclick: set(false) }, '✕'),
+          h('button', { class: state === 'like' ? 'on like' : '', 'aria-pressed': String(state === 'like'), onclick: set(true) }, '♥')
+        )
+      );
+      return el;
+    };
+    drawSummary();
+    openSheet(
+      `${member.name}'s choices`,
+      h(
+        'div',
+        { class: 'stack' },
+        summary,
+        c.state === 'closed' &&
+          h('p', { class: 'small' }, 'This collection is closed: changes count from the next "Hand out again" on the Results tab.'),
+        h('div', { class: 'card' }, data.items.map(row))
+      ),
+      { onClose: () => changed && reopen(current) }
     );
   }
 

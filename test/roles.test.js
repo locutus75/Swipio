@@ -290,12 +290,12 @@ test('admins can take items away from someone and hand them to others', async ()
   assert.deepEqual(who(d, 'Bike'), ['Pim']);
   assert.deepEqual(who(d, 'Lamp'), ['Pim']);
 
-  // A full redo also keeps skipping Ole for the bike
-  await t.admin('POST', `/api/admin/collections/${cid}/reallocate`, { keepCollected: false });
-  assert.deepEqual(who(await results(), 'Bike'), ['Pim']);
+  // Once handed out again, the take-away is forgotten
+  assert.deepEqual(d.removed, []);
 
-  // Undo the take-away, then a full redo may give it to Ole again (fewest items wins)
-  assert.equal((await t.admin('POST', `/api/admin/collections/${cid}/unrelease`, { userId: ole.id, itemId: bike.id })).status, 200);
+  // Undo works before handing out: take it away again, undo, and a full redo may give it to Ole (fewest items wins)
+  await t.admin('POST', `/api/admin/collections/${cid}/release`, { allocationIds: [d.allocations.find((a) => a.itemTitle === 'Bike').id] });
+  assert.equal((await t.admin('POST', `/api/admin/collections/${cid}/unrelease`, { userId: t.participant.id, itemId: bike.id })).status, 200);
   await t.admin('POST', `/api/admin/collections/${cid}/reallocate`, {});
   d = await results();
   assert.deepEqual(d.removed, []);
@@ -305,4 +305,32 @@ test('admins can take items away from someone and hand them to others', async ()
   await t.admin('POST', `/api/admin/collections/${cid}/release`, { allocationIds: [d.allocations.find((a) => a.itemTitle === 'Bike').id] });
   await t.admin('PATCH', `/api/admin/collections/${cid}`, { expiresAt: t.srv.now() + HOUR });
   assert.deepEqual((await results()).removed, []);
+});
+
+test('admins can change a participant\'s likes, also after closing', async () => {
+  const t = await team();
+  const { data } = await t.admin('POST', '/api/admin/collections', { name: 'Likes', expiresAt: t.srv.now() + HOUR, published: true });
+  const cid = data.collection.id;
+  const lamp = (await t.admin('POST', `/api/admin/collections/${cid}/items`, { title: 'Lamp' })).data.item;
+  await t.admin('PUT', `/api/admin/collections/${cid}/members`, { userIds: [t.participant.id] });
+  await t.admin('POST', `/api/admin/collections/${cid}/close`);
+  const choices = async () => (await t.admin('GET', `/api/admin/collections/${cid}`)).data.choices;
+
+  // Only admins, only participants, only items of this collection
+  assert.equal((await t.manager.client('PUT', `/api/admin/collections/${cid}/choices`, { userId: t.participant.id, itemId: lamp.id, liked: true })).status, 403);
+  assert.equal((await t.admin('PUT', `/api/admin/collections/${cid}/choices`, { userId: t.creator.id, itemId: lamp.id, liked: true })).status, 400);
+  assert.equal((await t.admin('PUT', `/api/admin/collections/${cid}/choices`, { userId: t.participant.id, itemId: 9999, liked: true })).status, 404);
+  assert.equal((await t.admin('PUT', `/api/admin/collections/${cid}/choices`, { userId: t.participant.id, itemId: lamp.id, liked: 'yes' })).status, 400);
+
+  // Like it on Pim's behalf; a new hand-out uses it
+  assert.equal((await t.admin('PUT', `/api/admin/collections/${cid}/choices`, { userId: t.participant.id, itemId: lamp.id, liked: true })).status, 200);
+  assert.deepEqual(await choices(), [{ userId: t.participant.id, itemId: lamp.id, liked: true }]);
+  await t.admin('POST', `/api/admin/collections/${cid}/reallocate`, { onlyFree: true });
+  assert.equal((await t.participant.client('GET', `/api/collections/${cid}`)).data.items[0].won, true);
+
+  // Change to pass, then clear
+  await t.admin('PUT', `/api/admin/collections/${cid}/choices`, { userId: t.participant.id, itemId: lamp.id, liked: false });
+  assert.equal((await choices())[0].liked, false);
+  await t.admin('PUT', `/api/admin/collections/${cid}/choices`, { userId: t.participant.id, itemId: lamp.id, liked: null });
+  assert.deepEqual(await choices(), []);
 });
