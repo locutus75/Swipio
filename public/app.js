@@ -1500,10 +1500,22 @@ async function viewAdminCollection(id, tab) {
       counts,
       data.deletesAt && h('div', { class: 'small', style: { color: 'var(--nope)', marginTop: '4px' } }, `🗑 Will be deleted ${formatDate(data.deletesAt)} (${data.limits.planName} plan)`)
     ),
-    c.state === 'draft' && h('button', { class: 'primary', onclick: publish }, '🚀 Publish'),
-    c.state === 'open' && h('button', { onclick: closeNow }, '⏹ Close now'),
-    c.state === 'closed' && data.canReopen && h('button', { onclick: openReopenSheet }, '🔓 Reopen')
+    h('div', { class: 'status-actions' },
+      c.state === 'draft' && h('button', { class: 'primary', onclick: publish }, '🚀 Publish'),
+      c.state === 'open' && h('button', { onclick: closeNow }, '⏹ Close now'),
+      c.state === 'closed' && data.canReopen && h('button', { onclick: openReopenSheet }, '🔓 Reopen'),
+      c.state !== 'closed' && h('button', { onclick: openInviteSheet }, '👥 Invite people')
+    )
   );
+
+  /** Invite someone to this collection from any tab. */
+  function openInviteSheet() {
+    const dlg = openSheet(
+      'Invite people',
+      inviteForm({ collectionId: id, onCreated: () => { dlg.close(); reopen('people'); } })
+    );
+    dlg.querySelector('input[name=name]')?.focus();
+  }
 
   // --- items ---
   const itemsList = h('div', {});

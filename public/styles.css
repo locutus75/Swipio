@@ -1191,3 +1191,16 @@ dialog.confirm p {
 .start-own p {
   margin: 0;
 }
+
+/* Collection header: Publish / Close / Reopen plus Invite people */
+.status-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.status-actions:empty {
+  display: none;
+}
